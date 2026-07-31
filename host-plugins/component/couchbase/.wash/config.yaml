@@ -1,0 +1,24 @@
+version: 2.0.0
+
+wit:
+  # Two packages resolve from this checkout rather than a registry:
+  #
+  #   wasmcloud:couchbase — this project's own capability contract, in
+  #     `interface/`. That directory is what a consuming workload copies into
+  #     its own `wit/deps/`.
+  #   wasmcloud:host — defined and installed by the wasmCloud runtime itself,
+  #     vendored under `wit-deps/` from wasmCloud `main` so a clean checkout
+  #     builds without depending on what happens to be published.
+  #
+  # The leading `./` is required: wash reads a bare `a/b` source as an OCI
+  # reference and only treats a dot-prefixed value as a local path.
+  sources:
+    "wasmcloud:couchbase": ./interface
+    "wasmcloud:host": ./wit-deps/wasmcloud-host
+
+build:
+  # `wash build` runs `wit fetch` (resolving the overrides above), then this
+  # command. wasip2 is the right target even though the world is p3: the
+  # component-model async ABI comes from wit-bindgen's codegen, not the target.
+  command: cargo build --target wasm32-wasip2 --release
+  component_path: target/wasm32-wasip2/release/couchbase_plugin.wasm

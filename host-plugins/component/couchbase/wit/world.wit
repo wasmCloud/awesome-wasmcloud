@@ -1,0 +1,47 @@
+package wasmcloud:couchbase-plugin@0.1.0;
+
+/// The Couchbase component host plugin.
+///
+/// A host-scoped, long-lived component that provides `wasmcloud:couchbase` to
+/// every workload on the host that imports it, serving each one against the
+/// cluster named in that workload's own interface config. It runs inside the
+/// Wasm sandbox, so it reaches Couchbase over the Data API's HTTPS surface
+/// through `wasi:http/client` rather than over the binary KV protocol.
+///
+/// It exports no `wasi:cli/run`: there is no background work to do between
+/// calls, and a pure capability plugin is allowed to omit it.
+world couchbase-plugin {
+    /// Outbound HTTP to the cluster. `client/send` is the p3 asynchronous
+    /// shape, so a slow Couchbase round-trip yields the plugin's executor
+    /// instead of blocking every other tenant's call behind it.
+    ///
+    /// Which hosts this may actually reach is the operator's call, set through
+    /// the plugin's own `allowedHosts` — never a workload's.
+    import wasi:http/types@0.3.0;
+    import wasi:http/client@0.3.0;
+
+    /// Wall clock, used to turn the relative `expiry-seconds` of a `touch`
+    /// into the absolute ISO 8601 instant the Data API's touch endpoint wants.
+    import wasi:clocks/system-clock@0.3.0;
+
+    /// Who is calling. Every capability call resolves the caller's workload id
+    /// through this to find that workload's own cluster binding, so two
+    /// workloads sharing this plugin never see each other's credentials or
+    /// bucket.
+    import wasmcloud:host/identity@0.1.1;
+
+    /// Cooperative cancellation, polled around the HTTP round-trip so a
+    /// workload teardown does not have to wait out a hung cluster.
+    import wasmcloud:host/cancel@0.1.1;
+
+    /// Per-workload bind hooks. Configuration is validated here, at deploy
+    /// time, so a workload with a missing endpoint or credentials fails to
+    /// deploy with a clear message instead of failing on its first query.
+    export wasmcloud:host/workload-lifecycle@0.1.1;
+
+    /// The capability itself.
+    export wasmcloud:couchbase/types@0.1.0;
+    export wasmcloud:couchbase/document@0.1.0;
+    export wasmcloud:couchbase/binary@0.1.0;
+    export wasmcloud:couchbase/query@0.1.0;
+}
