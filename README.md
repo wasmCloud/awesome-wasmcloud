@@ -19,7 +19,7 @@ wash build
 - [Components](#components)
 - [Host Plugins](#host-plugins)
   - [Native Host Plugins](#native-host-plugins)
-  - [Component Host Plugins](#component-host-plugins)
+  - [Host Component Plugins](#host-component-plugins)
 - [Workload Examples](#workload-examples)
 - [Tools](#tools)
 - [Contributing](#contributing)
@@ -40,9 +40,9 @@ Rust implementations of the [`HostPlugin` trait](https://wasmcloud.com/docs/runt
 
 _Nothing here yet. [Add the first one](CONTRIBUTING.md)._
 
-### Component Host Plugins
+### Host Component Plugins
 
-Capabilities built as [WebAssembly components](https://wasmcloud.com/docs/runtime/creating-component-host-plugins) and deployed into a host at runtime as trigger services with a capability ingress, so you ship, version, and sandbox them like any other component. Currently opt-in via the `host-component-plugins` feature, so check the docs for the state of play before depending on one. Hosted projects live in [`host-plugins/component/`](host-plugins/component/).
+Capabilities built as [WebAssembly components](https://wasmcloud.com/docs/runtime/creating-host-component-plugins) and deployed into a host at runtime as trigger services with a capability ingress, so you ship, version, and sandbox them like any other component. Currently opt-in via the `host-component-plugins` feature, so check the docs for the state of play before depending on one. Hosted projects live in [`host-plugins/component/`](host-plugins/component/).
 
 _Nothing here yet. [Add the first one](CONTRIBUTING.md)._
 
