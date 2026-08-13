@@ -44,7 +44,7 @@ _Nothing here yet. [Add the first one](CONTRIBUTING.md)._
 
 Capabilities built as [WebAssembly components](https://wasmcloud.com/docs/runtime/creating-host-component-plugins) and deployed into a host at runtime as trigger services with a capability ingress, so you ship, version, and sandbox them like any other component. Currently opt-in via the `host-component-plugins` feature, so check the docs for the state of play before depending on one. Hosted projects live in [`host-plugins/component/`](host-plugins/component/).
 
-_Nothing here yet. [Add the first one](CONTRIBUTING.md)._
+- [couchbase](host-plugins/component/couchbase/) (hosted): Serves a `wasmcloud:couchbase` capability — document key-value operations, atomic counters, and SQL++ queries — over the Couchbase Capella Data API using `wasi:http/client@0.3.0`. Written in Rust with an all-async WIT interface, and takes per-workload cluster credentials through the `wasmcloud:host/workload-lifecycle` bind hook.
 
 ## Workload Examples
 

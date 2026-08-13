@@ -1,0 +1,314 @@
+package wasmcloud:couchbase@0.1.0;
+
+/// Types shared across the Couchbase interfaces.
+///
+/// The addressing model (`location`), the value model (`document`) and the
+/// error model (`error`, `server-error`) live here so `document`, `binary` and
+/// `query` all `use` the *same* types. That matters for the component-model
+/// `(implements ..)` mechanism: a host can route each labeled import to its own
+/// credentialed cluster binding, and values flowing through one label unify
+/// with the other interfaces because they all reference this one `types`
+/// package.
+interface types {
+  /// A document's Compare-And-Swap token — an opaque revision stamp the
+  /// cluster mints on every mutation.
+  ///
+  /// Read it off a `document` or a `mutation-result`, then hand it back in
+  /// `mutation-options.cas` to make the next write conditional on nothing else
+  /// having changed the document in between. A mismatch surfaces as
+  /// `error.cas-mismatch` rather than silently overwriting.
+  ///
+  /// Treat the value as opaque: it is not a counter, a timestamp, or ordered
+  /// across documents. `0` is never a valid CAS and means "unconditional".
+  type cas = u64;
+
+  /// How far a mutation must propagate through the cluster before it is
+  /// acknowledged.
+  ///
+  /// Stronger levels trade latency for durability. `none` returns as soon as
+  /// the active node has the mutation in memory, so an immediate node failure
+  /// can lose it.
+  enum durability-level {
+    /// Acknowledge as soon as the active node holds the mutation in memory.
+    none,
+    /// Acknowledge once a majority of replicas hold it in memory.
+    majority,
+    /// Acknowledge once a majority hold it in memory *and* the active node has
+    /// written it to disk.
+    ///
+    /// Sent to the Data API as `MajorityAndPersistOnMaster`, which is that
+    /// API's spelling of the level the Couchbase SDKs call
+    /// `MajorityAndPersistToActive`.
+    majority-and-persist-to-active,
+    /// Acknowledge once a majority of replicas have written it to disk.
+    persist-to-majority,
+  }
+
+  /// Which document a call addresses.
+  ///
+  /// The bucket is fixed by the workload's interface config and is deliberately
+  /// not addressable per call — a binding is scoped to one bucket so a
+  /// workload cannot reach data it was not granted. `scope` and `collection`
+  /// default to the binding's configured values (themselves defaulting to
+  /// `_default`) when left `none`.
+  record location {
+    /// Scope within the bound bucket. `none` uses the binding's configured
+    /// scope.
+    scope: option<string>,
+    /// Collection within the scope. `none` uses the binding's configured
+    /// collection.
+    collection: option<string>,
+    /// The document key, unique within the collection.
+    key: string,
+  }
+
+  /// A document as it exists in the cluster.
+  record document {
+    /// Raw stored bytes. For the common case of a JSON document this is the
+    /// UTF-8 encoded JSON text; the interface stays byte-oriented so binary
+    /// values and non-JSON transcoders work unchanged.
+    content: list<u8>,
+    /// The document's CAS as of this read.
+    cas: cas,
+    /// Couchbase common flags, describing how `content` is encoded. `0` when
+    /// the cluster did not report any.
+    %flags: u32,
+  }
+
+  /// Options common to the write operations.
+  record mutation-options {
+    /// Make the write conditional on the document still being at this CAS.
+    /// `none` writes unconditionally.
+    cas: option<cas>,
+    /// Time-to-live in seconds from now. `none` leaves the document's existing
+    /// expiry untouched; `0` explicitly clears any expiry.
+    expiry-seconds: option<u32>,
+    /// Durability requirement. `none` uses the cluster default.
+    durability: option<durability-level>,
+    /// Couchbase common flags to store alongside the value. `none` lets the
+    /// server derive them from the content type.
+    %flags: option<u32>,
+  }
+
+  /// What a successful write reports back.
+  record mutation-result {
+    /// The document's CAS after the mutation. Feed it into a later
+    /// `mutation-options.cas` to chain conditional writes.
+    cas: cas,
+  }
+
+  /// A structured error the cluster itself reported, as opposed to a failure
+  /// getting the request there.
+  record server-error {
+    /// HTTP status the Data API responded with.
+    status: u16,
+    /// Couchbase's machine-readable error code (e.g. `CasMismatch`,
+    /// `DocumentNotFound`, `InvalidArgument`), when one was returned. Branch on
+    /// this rather than parsing `message`.
+    code: option<string>,
+    /// Human-readable description from the cluster.
+    message: string,
+  }
+
+  /// The set of errors the functions in this package may raise.
+  ///
+  /// Following the wasip3 convention this enumerates specific named cases
+  /// rather than leaning on stringly-typed errors, and is intentionally
+  /// non-exhaustive: future versions may add cases, so consumers must always
+  /// include a catch-all arm. Cluster failures that do not map to a named case
+  /// arrive as `server`.
+  variant error {
+    /// The addressed document does not exist. Raised by operations that
+    /// require it to (`replace`, `remove`, `touch`, `append`, `prepend`);
+    /// lookups report absence as `none` instead.
+    not-found,
+    /// `insert` found a document already at that key.
+    already-exists,
+    /// A conditional write's `cas` no longer matches the stored document —
+    /// something else wrote it first. Re-read and retry.
+    cas-mismatch,
+    /// The request was rejected before it reached the cluster, or the cluster
+    /// rejected it as malformed (a bad key, an unparseable statement, an
+    /// out-of-range expiry).
+    invalid-argument(string),
+    /// The configured credentials were refused, or they do not grant this
+    /// operation on this bucket.
+    unauthorized,
+    /// The calling workload has no Couchbase binding on this plugin, or its
+    /// binding is missing required configuration. A deploy-time problem, not a
+    /// transient one — the message names what is missing.
+    not-configured(string),
+    /// The cluster could not be reached: DNS, TLS, connection, or a transport
+    /// error mid-response. Retrying may succeed.
+    request-failed(string),
+    /// The cluster returned an error that does not map to a case above.
+    /// `server-error.code` carries the machine-readable detail.
+    server(server-error),
+    /// The operation did not finish within the configured time limit.
+    timeout,
+    /// Some other implementation-specific failure.
+    other(string),
+  }
+}
+
+/// Key-value access to documents: the operations that read and write a whole
+/// document by key.
+///
+/// Every function is an `async func`. That is a hard requirement rather than a
+/// style choice — a wasmCloud component host plugin serves its capability
+/// across a store boundary, and the cross-store shim only registers and
+/// type-matches asynchronous imports, so a synchronous interface cannot be
+/// served by one at all.
+interface document {
+  use types.{location, document, mutation-options, mutation-result, error};
+
+  /// Read a document, or `none` if no document is stored at that key.
+  ///
+  /// `project` optionally narrows the read to a list of top-level JSON field
+  /// paths, so a large document can be partially fetched without transferring
+  /// the whole value. An empty list reads the full document.
+  get: async func(loc: location, project: list<string>) -> result<option<document>, error>;
+
+  /// Whether a document exists at that key, without transferring its value.
+  exists: async func(loc: location) -> result<bool, error>;
+
+  /// Store a document, failing with `already-exists` if the key is taken.
+  insert: async func(loc: location, content: list<u8>, options: option<mutation-options>) -> result<mutation-result, error>;
+
+  /// Store a document, creating it or replacing whatever is there.
+  upsert: async func(loc: location, content: list<u8>, options: option<mutation-options>) -> result<mutation-result, error>;
+
+  /// Replace an existing document, failing with `not-found` if the key is
+  /// absent. Pass `mutation-options.cas` to make the replace conditional.
+  replace: async func(loc: location, content: list<u8>, options: option<mutation-options>) -> result<mutation-result, error>;
+
+  /// Delete a document, failing with `not-found` if the key is absent.
+  remove: async func(loc: location, options: option<mutation-options>) -> result<mutation-result, error>;
+
+  /// Reset a document's time-to-live to `expiry-seconds` from now without
+  /// changing its content.
+  ///
+  /// `expiry-seconds` must be greater than zero. The Data API's touch endpoint
+  /// takes an absolute instant, which cannot express "never expires", so `0` is
+  /// rejected with `invalid-argument`; clear an expiry with `upsert` and
+  /// `mutation-options.expiry-seconds` of `0` instead.
+  touch: async func(loc: location, expiry-seconds: u32) -> result<mutation-result, error>;
+}
+
+/// Operations that mutate a document without sending its whole value: byte
+/// concatenation and atomic counters.
+interface binary {
+  use types.{location, cas, durability-level, mutation-options, mutation-result, error};
+
+  /// Options for the atomic counter operations.
+  record counter-options {
+    /// How much to add (`increment`) or subtract (`decrement`). Defaults to 1.
+    delta: option<u64>,
+    /// Value to create the counter with when the key does not yet exist.
+    /// `none` fails with `not-found` instead of creating it.
+    initial: option<u64>,
+    /// Time-to-live in seconds from now for the counter document.
+    expiry-seconds: option<u32>,
+    /// Durability requirement. `none` uses the cluster default.
+    durability: option<durability-level>,
+  }
+
+  /// The state of a counter after an atomic update.
+  record counter-result {
+    /// The counter's value after the operation.
+    value: u64,
+    /// The counter document's CAS after the operation.
+    cas: cas,
+  }
+
+  /// Atomically add to a counter document, creating it at
+  /// `counter-options.initial` if it is absent and an initial value was given.
+  increment: async func(loc: location, options: option<counter-options>) -> result<counter-result, error>;
+
+  /// Atomically subtract from a counter document. Couchbase counters saturate
+  /// at zero rather than wrapping.
+  decrement: async func(loc: location, options: option<counter-options>) -> result<counter-result, error>;
+
+  /// Append bytes to the end of an existing document's value.
+  append: async func(loc: location, content: list<u8>, options: option<mutation-options>) -> result<mutation-result, error>;
+
+  /// Prepend bytes to the start of an existing document's value.
+  prepend: async func(loc: location, content: list<u8>, options: option<mutation-options>) -> result<mutation-result, error>;
+}
+
+/// SQL++ (N1QL) access to the bound bucket through the cluster's Query
+/// Service.
+interface query {
+  use types.{error};
+
+  /// How current the indexes a query scans must be.
+  enum scan-consistency {
+    /// Scan whatever the index already holds. Fastest, and the cluster
+    /// default; a document written a moment ago may not be visible yet.
+    not-bounded,
+    /// Wait for the index to catch up to the moment the request was received,
+    /// so writes made before the query are visible to it — read-your-writes at
+    /// the cost of latency.
+    request-plus,
+  }
+
+  /// Parameters for one query.
+  ///
+  /// Bind user input through `positional-parameters` or `named-parameters`
+  /// rather than interpolating it into `statement`; the cluster then treats it
+  /// as a value and never as SQL++ syntax.
+  record query-options {
+    /// Values for the statement's positional placeholders (`$1`, `$2`, ...),
+    /// each as JSON text — `"\"LAX\""` for a string, `42` for a number.
+    positional-parameters: list<string>,
+    /// Values for the statement's named placeholders (`$airport`), as
+    /// `(name, json-text)` pairs. The name is given without the leading `$`.
+    named-parameters: list<tuple<string, string>>,
+    /// `bucket.scope` that unqualified keyspace references in `statement`
+    /// resolve against. `none` uses the binding's configured bucket and scope.
+    query-context: option<string>,
+    /// Index consistency requirement. `none` uses the cluster default.
+    scan-consistency: option<scan-consistency>,
+    /// Per-query time limit in milliseconds. `none` uses the binding's
+    /// configured timeout.
+    timeout-ms: option<u32>,
+    /// Reject the statement if it would mutate data. Use it to guarantee a
+    /// read-only path.
+    read-only: option<bool>,
+  }
+
+  /// What the Query Service reported about executing the statement.
+  record query-metrics {
+    /// Total time from receiving the request to sending the response, as the
+    /// service formats it (e.g. `1.2ms`).
+    elapsed-time: string,
+    /// Time spent executing, excluding queuing.
+    execution-time: string,
+    /// Number of rows returned.
+    result-count: u64,
+    /// Total size of the returned rows, in bytes.
+    result-size: u64,
+  }
+
+  /// A completed query.
+  record query-result {
+    /// One JSON document per row, as UTF-8 JSON text, in the order the service
+    /// returned them.
+    ///
+    /// Rows are text rather than a structured WIT value because SQL++ results
+    /// are arbitrarily shaped JSON, which WIT has no type for. Decode them with
+    /// whatever JSON library the consumer already uses.
+    rows: list<string>,
+    /// Execution statistics, when the service reported them.
+    metrics: option<query-metrics>,
+  }
+
+  /// Execute a SQL++ statement and return every row it produced.
+  ///
+  /// The whole result set is buffered before returning. The Query Service
+  /// delivers its response as a single JSON document, so a streaming signature
+  /// here would be streaming a payload that had already been received in
+  /// full — keep result sets bounded with `LIMIT` rather than relying on
+  /// backpressure that the underlying protocol does not provide.
+  query: async func(statement: string, options: option<query-options>) -> result<query-result, error>;
+}
