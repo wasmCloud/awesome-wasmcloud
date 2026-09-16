@@ -1,0 +1,101 @@
+# A self-hosted stand-in for the Couchbase endpoint this plugin talks to.
+#
+# There is no self-hostable Couchbase Data API: it is a Capella service, and no
+# Couchbase Server release ships it (verified against 7.6.4 and 8.0.2 -- every
+# `/v1/...` path 404s on every listening port). So this stack pairs a real
+# Couchbase Server with the Data API server in `dataapi/`, which serves the
+# documented surface through the official Couchbase SDK's native KV operations.
+#
+# Everything below that server is real: real storage, real CAS, real TTLs, real
+# binary documents, real SQL++. What it stands in for is Capella's own HTTP
+# translation layer.
+#
+#   docker compose up -d      # cluster + gateway, initialized and ready
+#   docker compose down -v    # tear it all down
+#
+# The gateway lands on http://127.0.0.1:9000 -- point the plugin's `endpoint`
+# there and allow `127.0.0.1:9000` in its allowedHosts.
+
+services:
+  couchbase:
+    image: couchbase:enterprise-7.6.4
+    container_name: cb-verify
+    ports:
+      - "8091:8091" # management / UI
+      - "8093:8093" # query service
+      - "11210:11210" # kv
+    healthcheck:
+      # `/pools` answers as soon as the node is up, before it is configured.
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8091/pools"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 10s
+
+  # One-shot: configures the node, creates the bucket, and adds the application
+  # credential the plugin authenticates with. Exits 0 when the cluster is usable.
+  couchbase-init:
+    image: couchbase:enterprise-7.6.4
+    container_name: cb-verify-init
+    depends_on:
+      couchbase:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        CB=couchbase://couchbase
+        ADMIN="--cluster-username Administrator --cluster-password password123"
+
+        # cluster-init is not idempotent -- it errors on an already-configured
+        # node -- so check first and `docker compose up` stays re-runnable
+        # against an existing volume.
+        if couchbase-cli server-list -c $$CB -u Administrator -p password123 >/dev/null 2>&1; then
+          echo "cluster already initialized"
+        else
+          couchbase-cli cluster-init -c $$CB $$ADMIN \
+            --services data,query,index \
+            --cluster-ramsize 1024 --cluster-index-ramsize 512
+        fi
+
+        until couchbase-cli server-list -c $$CB -u Administrator -p password123 >/dev/null 2>&1; do
+          echo "waiting for the cluster to accept management calls..."; sleep 2
+        done
+
+        # --bucket-replica 0 because this is a single node; the default of 1
+        # cannot be satisfied and makes the create fail noisily.
+        if couchbase-cli bucket-list -c $$CB -u Administrator -p password123 2>/dev/null | grep -q '^testbucket$$'; then
+          echo "bucket testbucket already exists"
+        else
+          couchbase-cli bucket-create -c $$CB -u Administrator -p password123 \
+            --bucket testbucket --bucket-type couchbase --bucket-ramsize 256 \
+            --bucket-replica 0 --enable-flush 1 --wait
+        fi
+
+        couchbase-cli user-manage -c $$CB -u Administrator -p password123 \
+          --set --rbac-username appuser --rbac-password apppass123 --auth-domain local \
+          --roles 'data_reader[testbucket],data_writer[testbucket],query_select[testbucket],query_insert[testbucket],query_update[testbucket],query_delete[testbucket],query_manage_index[testbucket]' \
+          || echo "user already exists"
+
+        echo "READY: bucket=testbucket user=appuser/apppass123"
+
+  data-api:
+    build: ./dataapi
+    container_name: cb-verify-dataapi
+    depends_on:
+      couchbase-init:
+        condition: service_completed_successfully
+    ports:
+      - "9000:9000"
+    environment:
+      # KV for documents, the query service for the SQL++ passthrough.
+      COUCHBASE_CONNSTR: couchbase://couchbase
+      COUCHBASE_QUERY_URL: http://couchbase:8093/query/service
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "python3 -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:9000/__log')\""
+      interval: 3s
+      timeout: 5s
+      retries: 20
