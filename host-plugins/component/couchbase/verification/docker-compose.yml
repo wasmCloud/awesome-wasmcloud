@@ -25,8 +25,18 @@ services:
       - "8093:8093" # query service
       - "11210:11210" # kv
     healthcheck:
-      # `/pools` answers as soon as the node is up, before it is configured.
-      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8091/pools"]
+      # `/pools` answers as soon as the node is up, and what we want to know is
+      # that it is answering at all.
+      #
+      # It cannot be `curl -sf`: an unconfigured node answers 200, but once the
+      # init step below provisions the cluster the same endpoint starts
+      # answering 401, and `-f` turns that into a failure. The node would go
+      # healthy on a fresh volume and then unhealthy the moment it was
+      # configured — so a second `up` against a kept volume fails immediately
+      # with "dependency failed to start", pointing at the wrong thing.
+      test:
+        - CMD-SHELL
+        - "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8091/pools | grep -qE '^(200|401)$$'"
       interval: 3s
       timeout: 5s
       retries: 40
