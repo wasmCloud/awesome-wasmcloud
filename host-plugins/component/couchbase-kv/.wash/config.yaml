@@ -1,0 +1,13 @@
+version: 2.0.0
+
+wit:
+  # One interface, two implementations: this resolves the *same*
+  # `wasmcloud:couchbase` definition the sibling Data API plugin exports, so the
+  # two cannot drift.
+  sources:
+    "wasmcloud:couchbase": ../couchbase/interface
+    "wasmcloud:host": ./wit-deps/wasmcloud-host
+
+build:
+  command: cargo build --target wasm32-wasip2 --release
+  component_path: target/wasm32-wasip2/release/couchbase_kv_plugin.wasm
