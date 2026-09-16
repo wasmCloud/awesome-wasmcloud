@@ -44,7 +44,8 @@ _Nothing here yet. [Add the first one](CONTRIBUTING.md)._
 
 Capabilities built as [WebAssembly components](https://wasmcloud.com/docs/runtime/creating-host-component-plugins) and deployed into a host at runtime as trigger services with a capability ingress, so you ship, version, and sandbox them like any other component. Currently opt-in via the `host-component-plugins` feature, so check the docs for the state of play before depending on one. Hosted projects live in [`host-plugins/component/`](host-plugins/component/).
 
-_Nothing here yet. [Add the first one](CONTRIBUTING.md)._
+- [couchbase-kv](host-plugins/component/couchbase-kv/) (hosted): A second implementation of the same `wasmcloud:couchbase@0.2.0` interface, embedding the official Couchbase Rust SDK to reach a cluster over `couchbases://` instead of the Data API. **Currently blocked**: the SDK compiles and runs under wasm, but cannot be driven from a plugin — a hostname panics in Tokio's DNS (unimplemented on wasm) and a literal address deadlocks in `block_on`. The README documents both failures and the native `wasi:sockets` p3 path that replaces it.
+- [couchbase](host-plugins/component/couchbase/) (hosted): Serves `wasmcloud:couchbase@0.2.0` — document CRUD and SQL++ queries — over the Couchbase Capella Data API using `wasi:http/client@0.3.0`. Written in Rust; mirrors the published `@0.1.0-draft` interface with `async func` throughout, which a component host plugin requires, and takes per-workload cluster credentials through the `wasmcloud:host/workload-lifecycle` bind hook.
 
 ## Workload Examples
 

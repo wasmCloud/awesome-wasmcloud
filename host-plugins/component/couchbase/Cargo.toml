@@ -1,0 +1,27 @@
+[package]
+name = "couchbase-plugin"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "wasmCloud component host plugin providing wasmcloud:couchbase over the Couchbase Data API"
+repository = "https://github.com/wasmCloud/awesome-wasmcloud"
+
+[lib]
+crate-type = ["cdylib"]
+name = "couchbase_plugin"
+
+[dependencies]
+# wasip3 async bindings. `async-spawn` and `inter-task-wakeup` are what let a
+# capability call await its HTTP round-trip while other tenants' calls keep
+# running on the same pinned instance.
+wit-bindgen = { version = "0.60.0", features = ["async-spawn", "inter-task-wakeup"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+
+[profile.release]
+lto = true
+opt-level = "s"
+strip = true
+
+[workspace]
