@@ -15,3 +15,11 @@ wit/deps/
 # verification/README.md for what it is and how to run it.
 verification/scenario/wit/deps/
 verification/scenario/Cargo.lock
+verification/scenario/wkg.lock
+
+# Unlike this project's own `.wash/config.yaml`, the scenario's is *generated*
+# by demo.sh on every run: it carries the absolute path of whichever plugin
+# build is being demonstrated, so committing it would bake in one machine's
+# layout. The `!.wash/` rule above re-included the directory for every project
+# under this one, so the scenario's copy has to be excluded again by name.
+verification/scenario/.wash/

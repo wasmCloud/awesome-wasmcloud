@@ -4,6 +4,11 @@ What was used to run the plugin against a real Couchbase cluster in a real
 wasmCloud host. The results are summarized in the project
 [README](../README.md#run-live); this is how to reproduce them.
 
+- `demo.sh` — the whole thing end to end, for showing someone. Brings the
+  cluster up, builds both plugins, and runs the *same* workload against each in
+  turn, then prints what was identical and where the two transports genuinely
+  differ. `--keep` leaves the cluster running; `KV_TRANSPORT=loopback` points
+  the KV plugin at `host.wasmcloud.internal` instead of the LAN address.
 - `docker-compose.yml` — the whole environment: a real Couchbase Server, an init
   step that configures it, and the Data API server. One command, no manual setup.
 - `dataapi/` — a **Data API server**, implementing the documented endpoints over
