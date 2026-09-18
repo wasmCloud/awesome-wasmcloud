@@ -10,12 +10,11 @@ HTTPS surface through `wasi:http/client@0.3.0` rather than over the binary KV
 protocol.
 
 > **Status: experimental, but exercised end to end.** It has been run in a real
-> wasmCloud host against a real Couchbase cluster — 27 scenario steps covering
-> every servable operation, including CAS conflicts, TTLs and parameterized
-> SQL++. One caveat matters: Couchbase's Data API is a **Capella** service, and
-> the cluster available for testing was self-managed, so the KV calls were
-> served by a stand-in gateway in front of that real cluster. See
-> [What is and is not verified](#what-is-and-is-not-verified).
+> wasmCloud host against live Capella, and — reproducibly, with no cloud account
+> — against a self-hosted cluster fronted by Couchbase's **Cloud Native
+> Gateway**, which is what serves the Data API. 33 scenario steps cover every
+> servable operation, including CAS conflicts, TTLs, binary documents and
+> parameterized SQL++. See [What is and is not verified](#what-is-and-is-not-verified).
 
 ## Relationship to `wasmcloud:couchbase@0.1.0-draft`
 
@@ -351,8 +350,9 @@ same instance, so it is the resource, not the shape of the instance around it.
 ### Run live
 
 The plugin was loaded into a wasmCloud host built from `main` with
-`host-component-plugins`, bound to a test workload, and driven over HTTP against
-Couchbase Server 7.6.4 in Docker. All 27 scenario steps passed:
+`host-component-plugins`, bound to a test workload, and driven against Couchbase
+Server 7.6.4 in Docker, through the Cloud Native Gateway's Data API over
+verified TLS. All 33 scenario steps pass:
 
 - **Round trips**: insert → get returns the same bytes and the same CAS;
   remove → get returns `not-found`.
@@ -388,8 +388,23 @@ was chunked; the plugin now sets `Content-Length` explicitly. And the
 absent.
 
 The harness is in [`verification/`](verification/) — `docker compose up -d`
-brings up Couchbase plus the Data API server — so this is reproducible rather
-than a claim.
+brings up Couchbase fronted by the Cloud Native Gateway, and `demo.sh` runs the
+whole thing — so this is reproducible rather than a claim.
+
+The gateway is the real Data API, not a reimplementation of its documentation.
+Earlier revisions of the harness stood in a hand-written Python server, on the
+mistaken belief that the Data API was Capella-only; the switch to CNG needed no
+change to the plugin, and turned up one gap the stand-in had hidden — the
+`Expires` header, below.
+
+### `with-expiry`
+
+A read reports the document's absolute expiry in an `Expires` header, present
+only when the document has a TTL, and `expires-at` is now filled from it.
+The gateway writes the header's zone as `UTC` where HTTP-date requires `GMT`, so
+a strict HTTP-date parser rejects every value it sends; the plugin accepts both
+spellings. The deprecated relative `expires-in-ns` is left empty — deriving it
+needs a clock read, and it would be stale the moment it was returned.
 
 ### Also verified
 
@@ -399,8 +414,9 @@ than a claim.
   `wasmcloud:host/identity` and `wasmcloud:host/cancel`; its exports are the
   four `wasmcloud:couchbase` interfaces plus
   `wasmcloud:host/workload-lifecycle@0.1.1`.
-- 24 unit tests cover config validation, endpoint parsing, error classification,
-  CAS parsing, URL segment encoding, and the ISO 8601 conversion.
+- 40 unit tests cover config validation, endpoint parsing, error classification,
+  CAS and mutation-token parsing, URL segment encoding, the ISO 8601 conversion,
+  and the `Expires` header.
 - A clean checkout builds with no warnings.
 
 ### Verified against real Capella
@@ -416,8 +432,10 @@ Data API endpoint. Two were closed by *finding bugs*:
   being sent, so *every CAS-conditional write would have failed outright* —
   `replace` with a CAS, `remove` with a CAS.
 
-Neither is visible from the specification; both took a live endpoint. The rest
-confirmed the implementation as it stood:
+Neither is visible from the specification; both took a live endpoint. Both are
+now reproducible without one: the Cloud Native Gateway in the harness sends the
+same ETag and mutation-token formats. The rest confirmed the implementation as
+it stood:
 
 | Question | Answer from Capella |
 |---|---|
@@ -437,16 +455,13 @@ earlier run was plaintext HTTP to localhost.
 
 ### Still unverified
 
-- **`couchbases://`.** This implementation speaks the Data API over HTTPS. A
-  transport speaking the binary KV protocol is a separate piece of work; see
-  [Operations this implementation cannot serve](#operations-this-implementation-cannot-serve)
-  for what that would unlock.
+- **`couchbases://` against Capella.** This implementation speaks the Data API
+  over HTTPS. The sibling [`couchbase-kv`](../couchbase-kv/) plugin speaks the
+  binary KV protocol and serves what this one cannot, but has so far been run
+  only against a self-hosted cluster.
 - **Durability levels beyond the default.** `X-CB-DurabilityLevel` is sent but
   its effect has not been observed on a multi-node cluster; the test cluster is
   single-node, where `majority` is trivially satisfied.
-- **`with-expiry`.** Capella returns an `Expires` response header on `GET`, so
-  `document-get-options.with-expiry` is satisfiable, but it is not implemented:
-  `expires-at` always comes back `none`.
 
 ## License
 

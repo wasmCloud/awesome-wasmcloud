@@ -3,7 +3,8 @@
 # Runs one unmodified workload against BOTH implementations of
 # `wasmcloud:couchbase@0.2.0` and shows that it cannot tell them apart.
 #
-#   - the `couchbase` plugin, over the Capella Data API's HTTPS surface
+#   - the `couchbase` plugin, over the Data API's HTTPS surface -- served here
+#     by Couchbase's Cloud Native Gateway, the same gateway that fronts Capella
 #   - the `couchbase-kv` plugin, over the binary KV protocol, with the official
 #     Couchbase Rust SDK compiled to wasm and driven through wasi:sockets
 #
@@ -80,30 +81,36 @@ HOSTADDR="$(ipconfig getifaddr en0 2>/dev/null || hostname -I 2>/dev/null | awk 
 [[ -n "$HOSTADDR" ]] || die "could not determine this machine's LAN address"
 note "cluster will be addressed as $HOSTADDR"
 
-step "Bringing up a real Couchbase Server, plus a Data API server"
-note "No Couchbase release ships the Data API, so dataapi/ implements the"
-note "documented endpoints over the SDK's native KV operations."
+step "Bringing up Couchbase Server, fronted by the Cloud Native Gateway"
+note "CNG serves the Data API -- the real one, not a stand-in -- on :18008."
 # Never swallow this: on failure `set -e` jumps straight to the cleanup trap,
 # and a hidden error here looks exactly like a hang much later on.
-if ! (cd "$HERE" && docker compose up -d > "$OUT/compose.log" 2>&1); then
+# CNG_SAN puts the address the plugin will dial into CNG's certificate.
+if ! (cd "$HERE" && CNG_SAN="IP:$HOSTADDR" docker compose up -d > "$OUT/compose.log" 2>&1); then
   sed 's/^/    /' "$OUT/compose.log"
   die "docker compose up failed"
 fi
 
-health_of() { docker inspect -f '{{.State.Health.Status}}' "$1" 2>/dev/null || echo missing; }
+# CNG's image is FROM scratch, so it has no healthcheck; readiness is probed
+# from here, through the same TLS the plugin will verify. It has to be the
+# SQL++ passthrough specifically: CNG answers document reads well before it
+# has loaded the cluster map, and until then `/_p/query` fails with "failed
+# to select query endpoint".
+cng_ready() {
+  curl -fsS --max-time 5 --cacert "$HERE/tls/ca.crt" -u appuser:apppass123 \
+    -H 'content-type: application/json' -d '{"statement":"SELECT 1"}' \
+    "https://$HOSTADDR:18008/_p/query/query/service" >/dev/null 2>&1
+}
 deadline=$((SECONDS + 300))
-while :; do
-  cb="$(health_of cb-verify)"
-  api="$(health_of cb-verify-dataapi)"
-  [[ "$cb" == "healthy" && "$api" == "healthy" ]] && break
+until cng_ready; do
   if (( SECONDS > deadline )); then
-    note "couchbase=$cb  dataapi=$api"
     (cd "$HERE" && docker compose ps)
-    die "cluster did not become healthy within 300s"
+    docker logs cb-verify-cng 2>&1 | tail -5 | sed 's/^/    /'
+    die "the Data API did not become ready within 300s"
   fi
   sleep 5
 done
-note "Couchbase and the Data API server are healthy"
+note "Couchbase and the Data API are ready, over TLS verified against tls/ca.crt"
 
 step "Building both plugins"
 build_plugin() {
@@ -133,7 +140,11 @@ run_scenario() {
 
   write_base_config
   {
-    printf '%s\n' 'dev:' '  host_plugins:'
+    # The Data API is HTTPS under a CA this stack generated; trusting it here
+    # is what lets the plugin verify CNG instead of skipping verification.
+    printf '%s\n' 'dev:' '  http_client_ca_paths:'
+    printf '    - %s\n' "$HERE/tls/ca.crt"
+    printf '%s\n' '  host_plugins:'
     printf '    - id: %s\n' "$plugin_id"
     printf '      file: %s\n' "$wasm"
     printf '%s\n' "$grants"
@@ -202,9 +213,9 @@ run_scenario() {
   fi
 }
 
-step "Run 1 of 2 — the same workload, over the Capella Data API (HTTPS)"
-run_scenario "Data API" couchbase "$DATAAPI_WASM" "http://$HOSTADDR:9000" \
-  "      allowedHosts: [\"$HOSTADDR:9000\"]" "$OUT/dataapi.txt"
+step "Run 1 of 2 — the same workload, over the Data API (HTTPS, via CNG)"
+run_scenario "Data API" couchbase "$DATAAPI_WASM" "https://$HOSTADDR:18008" \
+  "      allowedHosts: [\"$HOSTADDR:18008\"]" "$OUT/dataapi.txt"
 
 step "Run 2 of 2 — the same workload, over the binary KV protocol"
 if [[ "$KV_TRANSPORT" == "loopback" ]]; then

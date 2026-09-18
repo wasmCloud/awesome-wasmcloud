@@ -23,3 +23,7 @@ verification/scenario/wkg.lock
 # layout. The `!.wash/` rule above re-included the directory for every project
 # under this one, so the scenario's copy has to be excluded again by name.
 verification/scenario/.wash/
+
+# CNG's CA and leaf certificate, generated per machine by docker-compose.yml.
+# The CA key is a real signing key for this machine's trust, so it stays local.
+verification/tls/

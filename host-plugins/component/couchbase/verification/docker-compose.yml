@@ -1,20 +1,21 @@
-# A self-hosted stand-in for the Couchbase endpoint this plugin talks to.
+# A self-hosted Couchbase stack with the real Data API in front of it.
 #
-# There is no self-hostable Couchbase Data API: it is a Capella service, and no
-# Couchbase Server release ships it (verified against 7.6.4 and 8.0.2 -- every
-# `/v1/...` path 404s on every listening port). So this stack pairs a real
-# Couchbase Server with the Data API server in `dataapi/`, which serves the
-# documented surface through the official Couchbase SDK's native KV operations.
+# The Data API is not part of Couchbase Server -- every `/v1/...` path 404s on
+# Server itself -- but it *is* self-hostable: it is served by the Cloud Native
+# Gateway (CNG, github.com/couchbase/stellar-gateway), the same gateway that
+# fronts Capella. So this is not a stand-in. The ETag format (bare 16-digit
+# hex) and the mutation-token format (`bucket:vbid:vbuuid:seqno`) that had to
+# be discovered against live Capella come back identically from here.
 #
-# Everything below that server is real: real storage, real CAS, real TTLs, real
-# binary documents, real SQL++. What it stands in for is Capella's own HTTP
-# translation layer.
-#
-#   docker compose up -d      # cluster + gateway, initialized and ready
+#   docker compose up -d      # cluster + CNG, initialized and ready
 #   docker compose down -v    # tear it all down
 #
-# The gateway lands on http://127.0.0.1:9000 -- point the plugin's `endpoint`
-# there and allow `127.0.0.1:9000` in its allowedHosts.
+# The Data API is HTTPS only, on https://<host>:18008, under a CA this stack
+# generates into ./tls/ (gitignored, per machine). The plugin's host has to
+# trust it: in `wash dev`, list tls/ca.crt under `dev.http_client_ca_paths`.
+# Set CNG_SAN before `up` to name the address the plugin will dial -- a guest's
+# 127.0.0.1 is its *virtual* network, so that is usually the LAN address, e.g.
+#   CNG_SAN=IP:192.168.1.20 docker compose up -d
 
 services:
   couchbase:
@@ -90,22 +91,59 @@ services:
 
         echo "READY: bucket=testbucket user=appuser/apppass123"
 
-  data-api:
-    build: ./dataapi
-    container_name: cb-verify-dataapi
+  # One-shot: a CA and a CNG leaf certificate, reused across runs. The leaf's
+  # subject alternative names are what a client checks the address it dialled
+  # against, so they must include whatever the plugin's `endpoint` names.
+  cng-certs:
+    image: couchbase:enterprise-7.6.4
+    container_name: cb-verify-certs
+    restart: "no"
+    volumes:
+      - ./tls:/tls
+    environment:
+      CNG_SAN: ${CNG_SAN:-IP:127.0.0.1}
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        cd /tls
+        if [ ! -f ca.crt ]; then
+          openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -sha256 \
+            -keyout ca.key -out ca.crt -subj "/CN=cb-verify-local-ca" 2>/dev/null
+        fi
+        # The leaf is reissued every run, so a changed CNG_SAN (the laptop
+        # moved networks) takes effect without deleting the CA it chains to.
+        openssl req -newkey rsa:2048 -nodes -keyout cng.key -out cng.csr \
+          -subj "/CN=cb-verify-cng" 2>/dev/null
+        printf 'subjectAltName = DNS:localhost, IP:127.0.0.1, %s\n' "$$CNG_SAN" > cng.ext
+        openssl x509 -req -in cng.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+          -out cng.crt -days 825 -sha256 -extfile cng.ext 2>/dev/null
+        # CNG runs as an unprivileged user in a scratch image.
+        chmod 0644 cng.key cng.crt ca.crt
+        echo "issued for: $$(openssl x509 -in cng.crt -noout -ext subjectAltName | tail -1)"
+
+  # The Cloud Native Gateway: Protostellar gRPC on 18098, the Data API on 18008.
+  # `--dapi-proxy-services query` enables the `/_p/query/...` passthrough the
+  # plugin's SQL++ path uses. The image is FROM scratch, so there is no shell
+  # to run a healthcheck with; demo.sh probes it from the host instead.
+  cng:
+    image: couchbase/cloud-native-gateway:1.2.1
+    container_name: cb-verify-cng
     depends_on:
       couchbase-init:
         condition: service_completed_successfully
+      cng-certs:
+        condition: service_completed_successfully
     ports:
-      - "9000:9000"
-    environment:
-      # KV for documents, the query service for the SQL++ passthrough.
-      COUCHBASE_CONNSTR: couchbase://couchbase
-      COUCHBASE_QUERY_URL: http://couchbase:8093/query/service
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - "python3 -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:9000/__log')\""
-      interval: 3s
-      timeout: 5s
-      retries: 20
+      - "18008:18008" # Data API (HTTPS)
+      - "18098:18098" # Protostellar gRPC
+    volumes:
+      - ./tls:/tls:ro
+    command:
+      - --cb-host=couchbase
+      - --cb-user=Administrator
+      - --cb-pass=password123
+      - --dapi-port=18008
+      - --dapi-proxy-services=query
+      - --cert=/tls/cng.crt
+      - --key=/tls/cng.key
