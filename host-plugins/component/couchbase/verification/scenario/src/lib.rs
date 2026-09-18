@@ -650,8 +650,43 @@ async fn scenario() -> Vec<String> {
                 describe_query,
             );
         }
-        Err(e) => r.push("31 mutation-token-parsed", format!("UNEXPECTED-ERR {}", describe(&e))),
+        Err(e) => r.push("29 mutation-token-parsed", format!("UNEXPECTED-ERR {}", describe(&e))),
     }
+
+    // A document written with a TTL has to report that expiry when asked for it.
+    // Both transports can: the Data API sends an `Expires` header on the read,
+    // the KV protocol returns it from a subdoc lookup. An implementation that
+    // ignored `with-expiry` would still return the document, so the step checks
+    // the field itself — and that it is in the future, not a placeholder.
+    let ek = "scenario:expiry";
+    let _ = document::remove(ek.to_string(), None).await;
+    let written = document::upsert(
+        ek.to_string(),
+        r#"{"e":1}"#.as_bytes().to_vec(),
+        Some(upsert_opts(3600 * SECOND_NS)),
+    )
+    .await;
+    r.push(
+        "31 get-with-expiry",
+        match written {
+            Err(e) => format!("UNEXPECTED-ERR writing a document with a TTL: {}", describe(&e)),
+            Ok(_) => match document::get(
+                ek.to_string(),
+                Some(DocumentGetOptions { with_expiry: true, ..get_opts(None) }),
+            )
+            .await
+            {
+                Ok(g) => match g.expires_at {
+                    Some(t) if t.year >= 2026 => {
+                        format!("OK expires-at={:04}-{:02}-{:02}", t.year, t.month, t.day)
+                    }
+                    Some(t) => format!("UNEXPECTED-OK expires-at is in the past: year {}", t.year),
+                    None => "UNEXPECTED-OK with-expiry was set but no expires-at came back".to_string(),
+                },
+                Err(e) => format!("UNEXPECTED-ERR {}", describe(&e)),
+            },
+        },
+    );
 
     r.ok(
         "32 upsert-binary-document",

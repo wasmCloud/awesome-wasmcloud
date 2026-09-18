@@ -10,20 +10,24 @@ The interface is not copied. [`.wash/config.yaml`](.wash/config.yaml) resolves
 cannot drift.
 
 **Status: working.** It embeds the official Couchbase Rust SDK, compiles to
-`wasm32-wasip2`, loads as a host component plugin, and scores 32/32 on the
+`wasm32-wasip2`, loads as a host component plugin, and scores 33/33 on the
 shared verification scenario against a real cluster — the same scenario the
-sibling plugin also scores 32/32 on. See
+sibling plugin also scores 33/33 on. See
 [`../couchbase/verification/`](../couchbase/verification/).
 
 ## Why this exists
 
-The Data API is a Capella service with a fixed endpoint set. This transport:
+The Data API is served by Couchbase's Cloud Native Gateway — in Capella, or
+self-hosted in front of any cluster — and has a fixed endpoint set. This
+transport:
 
-- works against **self-hosted Couchbase**, which has no Data API at all;
-- serves **`get-and-lock` / `unlock`**, which the Data API has no endpoint for
-  and the sibling plugin reports as `unsupported`;
-- honours **`preserve-expiry`** and **`consistent-with`** (`at_plus` scan
-  consistency, built from real mutation tokens), which the Data API cannot;
+- needs **no gateway** in front of the cluster: it talks to the data and query
+  services directly;
+- serves **`get-and-lock` / `unlock`**, which the stable Data API has no
+  endpoint for and the sibling plugin reports as `unsupported`. (CNG does carry
+  `/v1.alpha/.../lock` and `/unlock`, behind `--alpha-endpoints`; the sibling
+  does not use alpha endpoints, which Capella need not expose);
+- honours **`preserve-expiry`**, which the Data API cannot express;
 - avoids an HTTP hop for what is natively a binary protocol.
 
 ## Getting the SDK into a component

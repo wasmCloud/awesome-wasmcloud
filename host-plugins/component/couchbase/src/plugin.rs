@@ -27,7 +27,7 @@ use bindings::exports::wasmcloud::couchbase::sqlpp::{
 };
 use bindings::exports::wasmcloud::couchbase::sqlpp_types::SqlppQueryError;
 use bindings::exports::wasmcloud::couchbase::types::{
-    Document, DocumentError, DurabilityLevel, MutationMetadata,
+    Document, DocumentError, DurabilityLevel, MutationMetadata, Time,
 };
 use bindings::exports::wasmcloud::host::workload_lifecycle::{
     Guest as LifecycleGuest, WorkloadInfo,
@@ -490,11 +490,28 @@ async fn read(binding: &Binding, path: &str) -> Result<DocumentGetResult, Docume
         flags: reply.flags(),
         // Bytes exactly as stored: a Couchbase document need not be JSON, and
         // decoding it here would fail on every binary value.
+        // The read reports the absolute expiry in an `Expires` header, present
+        // only when the document has a TTL. It is filled whenever it is sent,
+        // which `with-expiry` permits: the WIT says only that the field "may
+        // not be present" without it. The relative, deprecated field is left
+        // absent — deriving it would need a clock read and go stale at once.
+        expires_at: reply
+            .header("expires")
+            .as_deref()
+            .and_then(api::parse_expires)
+            .map(|e| Time {
+                offset: 0,
+                year: e.year,
+                month: e.month,
+                day: e.day,
+                hour: e.hour,
+                minute: e.minute,
+                second: e.second,
+                milliseconds: 0,
+                nanoseconds: 0,
+            }),
         document: reply.body,
-        // The Data API's document read reports no expiry, so `with-expiry` has
-        // nothing to fill these from. Left absent rather than guessed.
         expires_in_ns: None,
-        expires_at: None,
     })
 }
 

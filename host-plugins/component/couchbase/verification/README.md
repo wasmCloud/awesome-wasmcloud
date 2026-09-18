@@ -5,94 +5,83 @@ wasmCloud host. The results are summarized in the project
 [README](../README.md#run-live); this is how to reproduce them.
 
 - `demo.sh` — the whole thing end to end, for showing someone. Brings the
-  cluster up, builds both plugins, and runs the *same* workload against each in
+  stack up, builds both plugins, and runs the *same* workload against each in
   turn, then prints what was identical and where the two transports genuinely
-  differ. `--keep` leaves the cluster running; `KV_TRANSPORT=loopback` points
+  differ. `--keep` leaves the stack running; `KV_TRANSPORT=loopback` points
   the KV plugin at `host.wasmcloud.internal` instead of the LAN address.
 - `docker-compose.yml` — the whole environment: a real Couchbase Server, an init
-  step that configures it, and the Data API server. One command, no manual setup.
-- `dataapi/` — a **Data API server**, implementing the documented endpoints over
-  the official Couchbase SDK's native KV operations. Since no Couchbase release
-  ships the Data API, this is what makes end-to-end testing possible at all.
+  step that configures it, and the **Cloud Native Gateway** in front of it,
+  serving the Data API. One command, no manual setup.
 - `scenario/` — a workload component importing `wasmcloud:couchbase`. One
-  `GET /` runs 32 steps and returns a line per step, so a single request
+  `GET /` runs 33 steps and returns a line per step, so a single request
   exercises the whole capability across the store boundary.
 
 The scenario drives **both** implementations — the Data API plugin here and the
 [KV plugin](../../couchbase-kv/) — because they export the same interface, and
-both score 32/32. Where the two transports genuinely differ it asserts on
+both score 33/33. Where the two transports genuinely differ it asserts on
 coherence rather than on one fixed answer: `get-and-lock`/`unlock` and
 `preserve-expiry` either report `unsupported`, or work *and* are checked for
 having actually worked — the lock must refuse a wrong CAS and accept its own,
 and a preserved TTL must still be there on read-back. A step that only checked
 "returned ok" would pass on an implementation that silently dropped the option.
 
-Point the KV plugin at the cluster directly (`couchbase://<lan-host>`, port
-11210) rather than at the gateway; it does not need `dataapi/` at all.
+The KV plugin talks to the cluster directly (`couchbase://<lan-host>`, ports
+11210 and 8093) and does not go through the gateway at all.
 
-Point the plugin at a real Capella endpoint instead and `dataapi/` is
-unnecessary — that is the run that would close the [open
-questions](../README.md#still-unverified).
+## The Data API here is the real one
 
-## What the Data API server is, and what it proves
+The Data API is not part of Couchbase Server — every `/v1/...` path 404s on
+Server itself — but it is not Capella-only either. It is served by the
+[Cloud Native Gateway](https://docs.couchbase.com/cloud-native-gateway/current/intro/about-cng.html)
+(CNG, [`couchbase/stellar-gateway`](https://github.com/couchbase/stellar-gateway)),
+which also serves Protostellar gRPC. The public
+`couchbase/cloud-native-gateway` image runs standalone next to any cluster, so
+this stack needs neither Kubernetes nor the operator.
 
-It performs **native KV operations** through the SDK rather than translating to
-SQL++, so the semantics under test are the cluster's own:
+That makes this a test against the actual implementation rather than a reading
+of its documentation. The formats that had to be discovered against live
+Capella come back from CNG byte for byte: the ETag is bare 16-digit hex
+(`18d67903e6ef0000`), and the mutation token is `bucket:vbid:vbuuid:seqno`
+(`testbucket:663:6268d18e82e2:4`). The plugin needed no change to pass here.
 
-- CAS is the real 64-bit value the cluster mints. A `remove` reports one, which
-  a SQL++ translation cannot.
-- Binary documents are stored as bytes with their real common flags, through a
-  pass-through transcoder. Couchbase itself describes the scenario's binary
-  document as `<binary (6 b)>` — it is not JSON wrapped in anything.
-- Expiry, `touch`, `get-and-touch`, counters and append/prepend are the real KV
-  operations, so a TTL is a real TTL.
-- Errors are real SDK exceptions (`DocumentExistsException`,
-  `CasMismatchException`, ...) mapped onto the documented codes, rather than
-  inferred from a status.
+It did expose one gap. A read reports a document's absolute expiry in an
+`Expires` header, which the plugin had been ignoring — `with-expiry` always
+came back empty. Step 31 now checks it. CNG writes that header's zone as
+`UTC` where HTTP-date requires `GMT`, so a strict HTTP-date parser would reject
+every value it sends; the plugin's is lenient about exactly that.
 
-It serves **only** the documented endpoint set. Inventing routes the real Data
-API lacks — a lock/unlock, a replica read — would produce a harness that passes
-against fiction, and would hide exactly the `unsupported` results the plugin is
-supposed to return.
-
-**The limit of it:** the store beneath is real Couchbase, so anything depending
-on cluster behaviour is genuine. The mapping from HTTP onto those operations is
-this server's reading of the published reference — the same reading the plugin
-holds. It cannot confirm that reading is correct. Only a real Capella endpoint
-can, which is why the [open questions](../README.md#still-unverified) stay
-open.
-
-## Why there is no pure-Docker option
-
-The Data API is a Capella service. No Couchbase Server release ships it —
-verified by probing every listening HTTP port on both **7.6.4** and **8.0.2**
-(the newest published image):
-
-```console
-$ curl -u Administrator:... http://127.0.0.1:8091/v1/callerIdentity
-Not found.
-```
-
-Every `/v1/buckets/.../documents/...` path 404s on 8091, 8092, 8093 and their
-TLS counterparts. There is no `couchbase/data-api` image on Docker Hub either;
-the only adjacent one is `couchbase/sync-gateway`, which serves the App
-Services API, a different contract. Port 11280 on 8.0.x is the gRPC
-(`couchbase2://`) endpoint, not REST.
-
-Hence `dataapi/`. Everything underneath it is a real cluster.
+**Earlier revisions of this harness said the opposite** — that no Couchbase
+release ships the Data API — and stood in a hand-written Python server
+implementing the published reference. That server is gone. Its limit was the
+one this replaces: it could only confirm the plugin agreed with the same reading
+of the reference the plugin already held.
 
 ## Running it
 
-**1. The stack.**
+`./demo.sh` does all of the below. By hand:
+
+**1. The stack.** The Data API is HTTPS only, under a CA the stack generates
+into `tls/` (gitignored, per machine). The leaf certificate must name the
+address the plugin will dial, so pass it in:
 
 ```console
-docker compose up -d
+LAN=$(ipconfig getifaddr en0)      # macOS; `hostname -I | awk '{print $1}'` on Linux
+CNG_SAN="IP:$LAN" docker compose up -d
 ```
 
-That starts Couchbase, waits for it to be healthy, configures the node, creates
-`testbucket`, adds `appuser` / `apppass123`, builds the Data API server and
-starts it on <http://127.0.0.1:9000>. It is re-runnable against an existing
-volume and prints `READY:` when usable. `docker compose down -v` removes it.
+That starts Couchbase, configures the node, creates `testbucket`, adds
+`appuser` / `apppass123`, issues the certificates, and starts CNG with the Data
+API on `https://$LAN:18008` and Protostellar gRPC on `18098`. It is re-runnable
+against an existing volume; `docker compose down -v` removes it.
+
+Give CNG about half a minute. Document reads answer almost at once, but the
+SQL++ passthrough (`/_p/query/...`) fails with `failed to select query endpoint`
+until CNG has loaded the cluster map. Readiness means *that* answers:
+
+```console
+curl --cacert tls/ca.crt -u appuser:apppass123 -H 'content-type: application/json' \
+  -d '{"statement":"SELECT 1"}' "https://$LAN:18008/_p/query/query/service"
+```
 
 **2. A host with the feature.** Component host plugins are opt-in and absent
 from released `wash` builds:
@@ -102,80 +91,40 @@ git clone https://github.com/wasmCloud/wasmCloud && cd wasmCloud
 cargo build --bin wash --features host-component-plugins
 ```
 
-**3. The scenario.** Build the plugin (`wash build` in the project root), copy
-`../interface/couchbase.wit` into `scenario/wit/deps/wasmcloud-couchbase/`
-along with the p3 WASI deps, and give `scenario/.wash/config.yaml` the plugin
-and its interface config:
+**3. The scenario.** Build the plugin (`wash build --skip-fetch` in the project
+root), then give `scenario/.wash/config.yaml` the WIT source, the CA, the plugin
+and its interface config. `wasmcloud:couchbase@0.2.0` is not published, so it
+resolves from `../../interface`; run `wash wit fetch` once in `scenario/`,
+because `wash dev` deliberately does not fetch.
 
 ```yaml
 version: 2.0.0
+wit:
+  sources:
+    "wasmcloud:couchbase": ../../interface
 build:
   command: cargo build --target wasm32-wasip2 --release
   component_path: target/wasm32-wasip2/release/cbtest.wasm
 dev:
+  # Trust the stack's CA for outbound HTTPS. This reaches a host plugin's
+  # wasi:http too, so the plugin verifies CNG rather than skipping verification.
+  http_client_ca_paths:
+    - /absolute/path/to/verification/tls/ca.crt
   host_plugins:
     - id: couchbase
       file: ../../target/wasm32-wasip2/release/couchbase_plugin.wasm
-      allowedHosts: ["127.0.0.1:9000"]
+      allowedHosts: ["<LAN>:18008"]
   host_interfaces:
     - namespace: wasmcloud
       package: couchbase
       interfaces: [types, sqlpp-types, document, sqlpp]
       version: "0.2.0"
       config:
-        endpoint: http://127.0.0.1:9000
+        endpoint: https://<LAN>:18008
         bucket: testbucket
         username: appuser
         password: apppass123
 ```
-
-### Address the gateway by LAN IP, not `127.0.0.1`
-
-`127.0.0.1` inside a guest means the **virtual** network, so a plugin dialling
-`127.0.0.1:9000` gets `ConnectionRefused` rather than the gateway published on
-the machine. `host.wasmcloud.internal` is the name for the machine's loopback.
-
-For the **KV plugin**, which uses raw `wasi:sockets`, that name is all it takes
-— see [its README](../../couchbase-kv/README.md#reaching-the-machines-loopback);
-`allowedHostLoopbackPorts` on the plugin entry is enough and `dataapi/` is not
-needed at all.
-
-The **Data API plugin** cannot use it: `wasi:http` does not resolve the
-sentinel (`DnsError: address not available`) and does not read
-`allowedHostLoopbackPorts`. Use the LAN address for this one.
-
-Use the machine's LAN address instead. Docker publishes on `0.0.0.0`, so the
-gateway answers there, and a LAN address is an ordinary external address that
-plain egress already covers:
-
-```console
-LAN=$(ipconfig getifaddr en0)      # macOS; `hostname -I | awk '{print $1}'` on Linux
-```
-
-A LAN *hostname* works too, and is worth preferring on a laptop whose address
-moves between networks — this one changed twice mid-session. The KV plugin
-resolves it through `wasi:sockets/ip-name-lookup`, so the declaration also needs
-`allowedIpNameLookups`:
-
-```yaml
-    - id: couchbase-kv
-      allowedHosts: ["macbookpro.lan:11210", "macbookpro.lan:8093"]
-      allowedIpNameLookups: ["*"]
-```
-
-```yaml
-dev:
-  plugins:
-    - id: couchbase
-      allowedHosts: ["<LAN>:9000"]
-  host_interfaces:
-    - namespace: wasmcloud
-      package: couchbase
-      config:
-        endpoint: http://<LAN>:9000
-```
-
-Verified: 32/32 against wash 2.9.0 this way, where `127.0.0.1` scores 9/31.
 
 Then, from `scenario/`:
 
@@ -186,18 +135,43 @@ curl -s http://127.0.0.1:8000/
 
 Every line should read `OK`.
 
-## Seeing what went on the wire
+### Address the stack by LAN address, not `127.0.0.1`
 
-The server serves `GET http://127.0.0.1:9000/__log`, reporting the method,
-framing headers and options of every request the plugin made:
+`127.0.0.1` inside a guest means the **virtual** network, so a plugin dialling
+`127.0.0.1:18008` gets `ConnectionRefused` rather than the gateway published on
+the machine. `host.wasmcloud.internal` is the name for the machine's loopback.
 
-```console
-curl -s http://127.0.0.1:9000/__log | python3 -m json.tool
+For the **KV plugin**, which uses raw `wasi:sockets`, that name is all it takes
+— see [its README](../../couchbase-kv/README.md#reaching-the-machines-loopback);
+`allowedHostLoopbackPorts` on the plugin entry is enough.
+
+The **Data API plugin** cannot use it: `wasi:http` does not resolve the
+sentinel (`DnsError: address not available`) and does not read
+`allowedHostLoopbackPorts`. Use the LAN address. Docker publishes on `0.0.0.0`,
+so the gateway answers there, and a LAN address is an ordinary external address
+that plain egress already covers.
+
+A LAN *hostname* works too, and is worth preferring on a laptop whose address
+moves between networks. For the Data API plugin, remember the certificate: pass
+it to `CNG_SAN` as `DNS:<name>`. The KV plugin resolves the name through
+`wasi:sockets/ip-name-lookup`, so its declaration also needs
+`allowedIpNameLookups`:
+
+```yaml
+    - id: couchbase-kv
+      allowedHosts: ["macbookpro.lan:11210", "macbookpro.lan:8093"]
+      allowedIpNameLookups: ["*"]
 ```
 
-That is how the missing `Content-Length` was found — every request was going out
-`Transfer-Encoding: chunked`, including body-less `DELETE`s. Worth a glance
-after any change to the request path.
+## Seeing what went on the wire
+
+The Python server this harness used to run logged every request's method,
+framing headers and options at `/__log`. That went with it, and CNG has no
+equivalent. The log earned its place once: it is how the missing
+`Content-Length` was found, when every request was going out
+`Transfer-Encoding: chunked`, body-less `DELETE`s included. After a change to
+the request path, a capture of the plugin's traffic is now the way to check —
+which, the Data API being HTTPS, means doing it on the host side of TLS.
 
 ## Checking the cluster directly
 

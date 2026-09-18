@@ -183,6 +183,51 @@ pub fn expiry_duration(seconds: u32) -> String {
     format!("{seconds}s")
 }
 
+/// A document's absolute expiry, as the Data API reports it on a read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Expiry {
+    pub year: i32,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+}
+
+/// Parse the `Expires` header the Data API sends on a document read, e.g.
+/// `Fri, 18 Sep 2026 18:06:29 UTC`. The header is absent for a document with
+/// no TTL, so `None` covers both "no expiry" and "unparseable".
+///
+/// This is deliberately not a strict HTTP-date parser. The Cloud Native
+/// Gateway — which is what serves the Data API — writes the zone as `UTC`,
+/// where RFC 9110's IMF-fixdate requires `GMT`; a conformant parser rejects
+/// every value it sends. Both spellings name the same zone, so both are taken.
+/// The weekday is not checked: it is redundant with the date, and a mismatch
+/// says nothing useful about when the document expires.
+pub fn parse_expires(value: &str) -> Option<Expiry> {
+    let mut parts = value.split_whitespace();
+    let _weekday = parts.next()?;
+    let day: u8 = parts.next()?.parse().ok()?;
+    let month = match parts.next()? {
+        "Jan" => 1, "Feb" => 2, "Mar" => 3, "Apr" => 4, "May" => 5, "Jun" => 6,
+        "Jul" => 7, "Aug" => 8, "Sep" => 9, "Oct" => 10, "Nov" => 11, "Dec" => 12,
+        _ => return None,
+    };
+    let year: i32 = parts.next()?.parse().ok()?;
+    let mut clock = parts.next()?.split(':');
+    let hour: u8 = clock.next()?.parse().ok()?;
+    let minute: u8 = clock.next()?.parse().ok()?;
+    let second: u8 = clock.next()?.parse().ok()?;
+    if clock.next().is_some() || !matches!(parts.next()?, "GMT" | "UTC") || parts.next().is_some() {
+        return None;
+    }
+    // 60 allows a leap second, which HTTP-date permits.
+    if !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    Some(Expiry { year, month, day, hour, minute, second })
+}
+
 /// The `X-CB-DurabilityLevel` value for a WIT durability level.
 ///
 /// `MajorityAndPersistOnMaster` is the Data API's spelling of the level the
@@ -211,6 +256,37 @@ fn truncate(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_the_expires_header_the_gateway_actually_sends() {
+        // Verbatim from the Cloud Native Gateway, `UTC` and all.
+        assert_eq!(
+            parse_expires("Fri, 18 Sep 2026 18:06:29 UTC"),
+            Some(Expiry { year: 2026, month: 9, day: 18, hour: 18, minute: 6, second: 29 })
+        );
+        // The RFC spelling of the same zone is accepted too.
+        assert_eq!(
+            parse_expires("Fri, 18 Sep 2026 18:06:29 GMT"),
+            parse_expires("Fri, 18 Sep 2026 18:06:29 UTC")
+        );
+    }
+
+    #[test]
+    fn an_expires_value_that_is_not_a_date_is_none() {
+        for bad in [
+            "",
+            "1h",
+            "Fri, 18 Sep 2026 18:06:29",          // no zone
+            "Fri, 18 Sep 2026 18:06:29 PST",      // a zone it would have to convert
+            "Fri, 18 Sept 2026 18:06:29 UTC",     // not a three-letter month
+            "Fri, 32 Sep 2026 18:06:29 UTC",      // day out of range
+            "Fri, 18 Sep 2026 24:00:00 UTC",      // hour out of range
+            "Fri, 18 Sep 2026 18:06 UTC",         // no seconds
+            "Fri, 18 Sep 2026 18:06:29 UTC extra",
+        ] {
+            assert_eq!(parse_expires(bad), None, "{bad:?} should not parse");
+        }
+    }
 
     #[test]
     fn a_code_decides_over_an_ambiguous_status() {
