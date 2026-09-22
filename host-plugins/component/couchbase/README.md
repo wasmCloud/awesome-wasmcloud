@@ -12,7 +12,7 @@ protocol.
 > **Status: experimental, but exercised end to end.** It has been run in a real
 > wasmCloud host against live Capella, and — reproducibly, with no cloud account
 > — against a self-hosted cluster fronted by Couchbase's **Cloud Native
-> Gateway**, which is what serves the Data API. 33 scenario steps cover every
+> Gateway**, which is what serves the Data API. 34 scenario steps cover every
 > servable operation, including CAS conflicts, TTLs, binary documents and
 > parameterized SQL++. See [What is and is not verified](#what-is-and-is-not-verified).
 
@@ -54,9 +54,8 @@ note at the point it occurs in [`interface/couchbase.wit`](interface/couchbase.w
    0.1.0-draft has `variant document { raw(json-string), %resource(document-value) }`.
    See [below](#a-documents-value-bytes-and-flags).
 5. **`get-any-repliacs` aside, the operation set is unchanged.** Locking and
-   replica reads are kept: they are real KV-protocol operations that an
-   implementation speaking `couchbases://` serves, even though the Data API has
-   no endpoint for them. See [below](#operations-this-implementation-cannot-serve).
+   replica reads are kept. See
+   [below](#operations-this-implementation-cannot-serve).
 
 ## Requirements
 
@@ -249,8 +248,9 @@ A complete, compiling example of every operation is
 | `document.get-and-touch` | `POST …/documents/{id}/touch` with `returnContent` |
 | `sqlpp.query` | `POST /_p/query/query/service` |
 
-The four operations absent from this table — `get-and-lock`, `unlock`, and the
-two replica reads — have no Data API endpoint and return `unsupported` here.
+`get-and-lock` and `unlock` use `POST …/documents/{id}/lock` and `/unlock`
+under `/v1.alpha`, which a gateway serves only with `--alpha-endpoints`. The two
+replica reads return `unsupported`.
 
 Options travel as headers: CAS as `If-Match`, TTL as `Expires` (a Go duration
 string, so no calendar arithmetic is involved), durability as
@@ -265,16 +265,13 @@ must handle those differently.
 
 ### Operations this implementation cannot serve
 
-`get-and-lock`, `unlock`, `get-any-replicas` and `get-all-replicas` are part of
-the interface, and this implementation returns `document-error.unsupported` for
-all four, naming what to use instead.
+`get-any-replicas` and `get-all-replicas` return `document-error.unsupported`.
+Reading a replica means addressing one node, and the Data API is a single
+endpoint in front of the cluster.
 
-That split is deliberate. The interface describes **Couchbase**, not the Data
-API. Pessimistic locking and replica reads are real KV-protocol operations that
-an implementation speaking `couchbases://` serves. The Data API simply has no
-path for them — its OpenAPI specification's complete path set is
-`callerIdentity`, document `GET`/`POST`/`PUT`/`DELETE`, `append`, `prepend`,
-`increment`, `decrement`, `touch`, and the query and search passthroughs.
+That split is deliberate. The interface describes **Couchbase**, not one
+transport. A replica read is a real operation that a transport addressing
+individual nodes serves.
 
 So this is exactly what `unsupported` is for: one interface, implementations
 with different reach, and a caller told plainly which it got rather than being
@@ -301,11 +298,10 @@ case); reads report `flags` alongside the value.
 **Why not `json-string`.** Couchbase is not a JSON-only store. Binary documents
 are first-class — they are what `append`/`prepend` and the counter operations
 act on, and what flags exist to describe. A `string` cannot hold one: any value
-that is not valid UTF-8 would have to fail. That was not hypothetical here — the
-earlier shape returned `not-json` for such a document, so it could not round-trip
-one at all. The [verification scenario](verification/scenario/src/lib.rs) now
-stores `[0x00, 0xFF, 0xFE, 0x01, 0x80, 0x7F]` and reads it back byte-for-byte
-with its flags intact.
+that is not valid UTF-8 would have to fail. The
+[verification scenario](verification/scenario/src/lib.rs) stores
+`[0x00, 0xFF, 0xFE, 0x01, 0x80, 0x7F]` and reads it back byte-for-byte with its
+flags intact.
 
 **Why not a resource.** 0.1.0-draft's `document-value` offered an "efficient
 implementer-specific" JSON representation. Two problems. It wrapped a string in
@@ -352,7 +348,7 @@ same instance, so it is the resource, not the shape of the instance around it.
 The plugin was loaded into a wasmCloud host built from `main` with
 `host-component-plugins`, bound to a test workload, and driven against Couchbase
 Server 7.6.4 in Docker, through the Cloud Native Gateway's Data API over
-verified TLS. All 33 scenario steps pass:
+verified TLS. All 34 scenario steps pass:
 
 - **Round trips**: insert → get returns the same bytes and the same CAS;
   remove → get returns `not-found`.
@@ -365,8 +361,7 @@ verified TLS. All 33 scenario steps pass:
 - **TTL**: `upsert` with a 600-second `expires-in-ns` produced a document whose
   expiration in the cluster was exactly 600 seconds after the write.
 - **Binary documents**: `[0x00, 0xFF, 0xFE, 0x01, 0x80, 0x7F]` written with raw
-  flags reads back byte-for-byte, flags intact — a value the earlier
-  `json-string` shape could not represent.
+  flags reads back byte-for-byte, flags intact.
 - **SQL++**: positional and null parameters both bind, `request-plus` scan
   consistency is accepted. A malformed statement surfaces as `invalid-argument`
   carrying the cluster's own message, never as an empty success.
@@ -380,31 +375,23 @@ verified TLS. All 33 scenario steps pass:
   produced `not-configured` naming the policy — not a misleading credentials
   error.
 
-Live testing changed the code twice, and both were worth it. Every request was
-going out as `Transfer-Encoding: chunked`, because a `wasi:http` body is a
-stream and the transport had no length to advertise — even a body-less `DELETE`
-was chunked; the plugin now sets `Content-Length` explicitly. And the
-`document-value` resource turned out not to link at all, which is why it is
-absent.
+Every request carries an explicit `Content-Length`. A `wasi:http` body is a
+stream with no length to advertise, so without it every request goes out
+`Transfer-Encoding: chunked`, body-less `DELETE`s included.
 
-The harness is in [`verification/`](verification/) — `docker compose up -d`
+The harness is in [`verification/`](verification/): `docker compose up -d`
 brings up Couchbase fronted by the Cloud Native Gateway, and `demo.sh` runs the
-whole thing — so this is reproducible rather than a claim.
-
-The gateway is the real Data API, not a reimplementation of its documentation.
-Earlier revisions of the harness stood in a hand-written Python server, on the
-mistaken belief that the Data API was Capella-only; the switch to CNG needed no
-change to the plugin, and turned up one gap the stand-in had hidden — the
-`Expires` header, below.
+whole thing. The gateway is the real Data API, not a reimplementation of it.
 
 ### `with-expiry`
 
 A read reports the document's absolute expiry in an `Expires` header, present
-only when the document has a TTL, and `expires-at` is now filled from it.
-The gateway writes the header's zone as `UTC` where HTTP-date requires `GMT`, so
-a strict HTTP-date parser rejects every value it sends; the plugin accepts both
-spellings. The deprecated relative `expires-in-ns` is left empty — deriving it
-needs a clock read, and it would be stale the moment it was returned.
+only when the document has a TTL. `expires-at` is filled from it.
+
+The gateway writes that header's zone as `UTC` where HTTP-date requires `GMT`, so
+a strict HTTP-date parser rejects every value it sends. The plugin accepts both
+spellings. The deprecated relative `expires-in-ns` stays empty: deriving it needs
+a clock read, and it would be stale on arrival.
 
 ### Also verified
 
@@ -417,25 +404,24 @@ needs a clock read, and it would be stale the moment it was returned.
 - 40 unit tests cover config validation, endpoint parsing, error classification,
   CAS and mutation-token parsing, URL segment encoding, the ISO 8601 conversion,
   and the `Expires` header.
+- `get-and-lock` and `unlock` go to `/v1.alpha`, which a gateway serves only
+  with `--alpha-endpoints`. An endpoint without them answers 404, which reads as
+  `not-found`.
 - A clean checkout builds with no warnings.
 
 ### Verified against real Capella
 
-Every question that was previously open is now closed, against a live Capella
-Data API endpoint. Two were closed by *finding bugs*:
+Run against a live Capella Data API endpoint. Two details are not visible from
+the specification, and both are load-bearing:
 
 - **The ETag is bare, unquoted, 16-digit hex** (`18c86cb5894f0000`), not
-  decimal. It was being parsed as decimal, so every CAS would have come back
-  `0`.
+  decimal. Parsed as decimal, every CAS reads `0`.
 - **`If-Match` must not be quoted.** Capella answers a quoted value with
-  `InvalidArgument: Invalid etag format '"..."'`. The RFC-style quotes were
-  being sent, so *every CAS-conditional write would have failed outright* —
-  `replace` with a CAS, `remove` with a CAS.
+  `InvalidArgument: Invalid etag format '"..."'`, which fails every
+  CAS-conditional write: `replace` with a CAS, `remove` with a CAS.
 
-Neither is visible from the specification; both took a live endpoint. Both are
-now reproducible without one: the Cloud Native Gateway in the harness sends the
-same ETag and mutation-token formats. The rest confirmed the implementation as
-it stood:
+Both are reproducible without a Capella account — the Cloud Native Gateway sends
+the same ETag and mutation-token formats. The rest:
 
 | Question | Answer from Capella |
 |---|---|
@@ -446,12 +432,9 @@ it stood:
 | Binary documents | Round-trip byte-for-byte with flags preserved |
 | `X-CB-MutationToken` format | `bucket:vbid:vbuuid-hex:seqno`, e.g. `travel-sample:16:794f18f71747:512` |
 
-The mutation token now parses structurally from a real response
+A real mutation token parses structurally
 (`vbid=34 vbuuid=88826486882458 seq=474`), and feeding it back as
 `consistent-with` produces a working `at_plus` query.
-
-This was also the first exercise of **TLS egress** from the plugin; every
-earlier run was plaintext HTTP to localhost.
 
 ### Still unverified
 

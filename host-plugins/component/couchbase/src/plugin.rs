@@ -18,7 +18,8 @@ use crate::mutation;
 use crate::timefmt;
 
 use bindings::exports::wasmcloud::couchbase::document::{
-    DocumentGetAndLockOptions, DocumentGetAndTouchOptions, DocumentGetOptions, DocumentGetResult,
+    DocumentGetAllReplicaOptions, DocumentGetAndLockOptions, DocumentGetAndTouchOptions,
+    DocumentGetAnyReplicaOptions, DocumentGetOptions, DocumentGetReplicaResult, DocumentGetResult,
     DocumentInsertOptions, DocumentRemoveOptions, DocumentReplaceOptions, DocumentTouchOptions,
     DocumentUnlockOptions, DocumentUpsertOptions, Guest as DocumentGuest,
 };
@@ -51,6 +52,9 @@ use bindings::wasmcloud::host::{cancel, identity};
 static BINDINGS: Mutex<BTreeMap<String, Binding>> = Mutex::new(BTreeMap::new());
 
 struct Component;
+
+/// What the server itself uses when a lock request names no duration.
+const DEFAULT_LOCK_SECONDS: u32 = 15;
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -364,6 +368,23 @@ fn document_path(binding: &Binding, id: &str) -> String {
     )
 }
 
+/// The `/v1.alpha` path for one document's locking endpoints.
+///
+/// Locking sits under `v1.alpha`, and a gateway serves it only when started
+/// with `--alpha-endpoints`. An endpoint that does not have it answers 404,
+/// which reads as `not-found` — so callers see a missing document rather than a
+/// missing feature.
+fn document_alpha_path(binding: &Binding, id: &str) -> String {
+    format!(
+        "{}/v1.alpha/buckets/{}/scopes/{}/collections/{}/documents/{}",
+        binding.base_path,
+        api::encode_segment(&binding.bucket),
+        api::encode_segment(&binding.scope),
+        api::encode_segment(&binding.collection),
+        api::encode_segment(id),
+    )
+}
+
 /// The `X-CB-DurabilityLevel` value, or `None` to leave the header off.
 fn durability(level: DurabilityLevel) -> Option<&'static str> {
     match level {
@@ -662,25 +683,92 @@ impl DocumentGuest for Component {
 
 
 
-    /// Not servable over the Data API: its OpenAPI specification has no
-    /// locking path. A binary-protocol implementation of this interface serves
-    /// it.
+    /// Lock the document and return it. The CAS in the result is the lock's:
+    /// only that value unlocks it, and only it writes through the lock.
     async fn get_and_lock(
-        _id: String,
-        _options: Option<DocumentGetAndLockOptions>,
+        id: String,
+        options: Option<DocumentGetAndLockOptions>,
     ) -> Result<DocumentGetResult, DocumentError> {
+        let binding = caller_binding()?;
+        let lock_time = options.as_ref().map_or(0, |o| o.lock_time);
+        let binding = binding.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
+
+        // Seconds is the unit the endpoint takes. Round a sub-second request up
+        // rather than to zero, which the server reads as its own default.
+        let seconds = if lock_time == 0 {
+            DEFAULT_LOCK_SECONDS
+        } else {
+            lock_time.div_ceil(1_000_000_000).max(1).min(u32::MAX.into()) as u32
+        };
+
+        let path = format!("{}/lock", document_alpha_path(&binding, &id));
+        let body = format!("{{\"lockTime\":{seconds}}}").into_bytes();
+        let reply = send(
+            &binding,
+            Method::Post,
+            &path,
+            &[("content-type", "application/json".to_string())],
+            Some(body),
+        )
+        .await?;
+        if !reply.ok() {
+            return Err(reply.failure());
+        }
+        Ok(DocumentGetResult {
+            cas: reply.cas(),
+            flags: reply.flags(),
+            document: reply.body,
+            expires_in_ns: None,
+            expires_at: None,
+        })
+    }
+
+    /// Release a lock, using the CAS `get-and-lock` returned.
+    ///
+    /// A CAS that is not the lock's is `cas-mismatch`; an unlocked document is
+    /// `not-locked`.
+    async fn unlock(id: String, options: Option<DocumentUnlockOptions>) -> Result<(), DocumentError> {
+        let binding = caller_binding()?;
+        let cas = options.as_ref().map_or(0, |o| o.cas);
+        if cas == 0 {
+            return Err(DocumentError::InvalidArgument(
+                "unlock needs the CAS returned by get-and-lock".to_string(),
+            ));
+        }
+        let binding = binding.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
+        let path = format!("{}/unlock", document_alpha_path(&binding, &id));
+        let reply = send(
+            &binding,
+            Method::Post,
+            &path,
+            &[("if-match", api::format_cas(cas))],
+            None,
+        )
+        .await?;
+        if !reply.ok() {
+            return Err(reply.failure());
+        }
+        Ok(())
+    }
+
+    /// Addressing a replica means addressing a specific node, which the Data
+    /// API does not expose: it is one endpoint in front of the cluster.
+    async fn get_any_replicas(
+        _id: String,
+        _options: Option<DocumentGetAnyReplicaOptions>,
+    ) -> Result<DocumentGetReplicaResult, DocumentError> {
         Err(DocumentError::Unsupported(
-            "get-and-lock is a KV-protocol operation with no Data API endpoint; use `get` plus a CAS-conditional `replace` for optimistic concurrency, or an implementation that speaks couchbases://".to_string(),
+            "reading from a replica needs a transport that addresses individual nodes; the Data API has no replica endpoint".to_string(),
         ))
     }
 
-    /// Not servable over the Data API; see `get-and-lock`.
-    async fn unlock(
+    /// Not servable over the Data API; see `get-any-replicas`.
+    async fn get_all_replicas(
         _id: String,
-        _options: Option<DocumentUnlockOptions>,
-    ) -> Result<(), DocumentError> {
+        _options: Option<DocumentGetAllReplicaOptions>,
+    ) -> Result<Vec<DocumentGetReplicaResult>, DocumentError> {
         Err(DocumentError::Unsupported(
-            "unlock is a KV-protocol operation with no Data API endpoint; nothing can be locked through this implementation".to_string(),
+            "reading from a replica needs a transport that addresses individual nodes; the Data API has no replica endpoint".to_string(),
         ))
     }
 

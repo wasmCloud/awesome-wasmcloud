@@ -54,7 +54,8 @@ use couchbase::error::Error as CbError;
 use couchbase::options::cluster_options::ClusterOptions;
 
 use bindings::exports::wasmcloud::couchbase::document::{
-    DocumentGetAndLockOptions, DocumentGetAndTouchOptions, DocumentGetOptions, DocumentGetResult,
+    DocumentGetAllReplicaOptions, DocumentGetAndLockOptions, DocumentGetAndTouchOptions,
+    DocumentGetAnyReplicaOptions, DocumentGetOptions, DocumentGetReplicaResult, DocumentGetResult,
     DocumentInsertOptions, DocumentRemoveOptions, DocumentReplaceOptions, DocumentTouchOptions,
     DocumentUnlockOptions, DocumentUpsertOptions, Guest as DocumentGuest,
 };
@@ -653,6 +654,28 @@ impl DocumentGuest for Component {
             seq: 0,
             raw_token: None,
         })
+    }
+
+    /// The SDK exposes no replica read: `couchbase` 1.0.1 has no
+    /// `get_any_replica`/`get_all_replicas`. The protocol supports it, so this
+    /// is a client gap, not a cluster one.
+    async fn get_any_replicas(
+        _id: String,
+        _options: Option<DocumentGetAnyReplicaOptions>,
+    ) -> Result<DocumentGetReplicaResult, DocumentError> {
+        Err(DocumentError::Unsupported(
+            "the Couchbase Rust SDK exposes no replica read".to_string(),
+        ))
+    }
+
+    /// Not exposed by the SDK; see `get-any-replicas`.
+    async fn get_all_replicas(
+        _id: String,
+        _options: Option<DocumentGetAllReplicaOptions>,
+    ) -> Result<Vec<DocumentGetReplicaResult>, DocumentError> {
+        Err(DocumentError::Unsupported(
+            "the Couchbase Rust SDK exposes no replica read".to_string(),
+        ))
     }
 
     async fn get_and_touch(

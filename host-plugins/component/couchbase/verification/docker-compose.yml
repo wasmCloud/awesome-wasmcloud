@@ -1,11 +1,10 @@
 # A self-hosted Couchbase stack with the real Data API in front of it.
 #
-# The Data API is not part of Couchbase Server -- every `/v1/...` path 404s on
-# Server itself -- but it *is* self-hostable: it is served by the Cloud Native
-# Gateway (CNG, github.com/couchbase/stellar-gateway), the same gateway that
-# fronts Capella. So this is not a stand-in. The ETag format (bare 16-digit
-# hex) and the mutation-token format (`bucket:vbid:vbuuid:seqno`) that had to
-# be discovered against live Capella come back identically from here.
+# The Data API is served by the Cloud Native Gateway (CNG,
+# github.com/couchbase/stellar-gateway), which fronts Capella and runs
+# self-hosted in front of any cluster. Couchbase Server does not serve it
+# itself. The ETag format (bare 16-digit hex) and the mutation-token format
+# (`bucket:vbid:vbuuid:seqno`) are the ones live Capella sends.
 #
 #   docker compose up -d      # cluster + CNG, initialized and ready
 #   docker compose down -v    # tear it all down
@@ -145,5 +144,7 @@ services:
       - --cb-pass=password123
       - --dapi-port=18008
       - --dapi-proxy-services=query
+      # Document locking lives under /v1.alpha; without this the endpoints 404.
+      - --alpha-endpoints
       - --cert=/tls/cng.crt
       - --key=/tls/cng.key

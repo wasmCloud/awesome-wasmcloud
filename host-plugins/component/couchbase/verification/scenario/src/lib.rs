@@ -84,6 +84,7 @@ fn get_opts(project: Option<Vec<String>>) -> DocumentGetOptions {
     DocumentGetOptions {
         with_expiry: false,
         project,
+        use_replica: None,
         timeout_ns: None,
         retry_strategy: None,
         parent_span: None,
@@ -118,6 +119,7 @@ fn describe(e: &DocumentError) -> String {
         DocumentError::CasMismatch => "cas-mismatch".to_string(),
         DocumentError::Locked => "locked".to_string(),
         DocumentError::NotLocked => "not-locked".to_string(),
+        DocumentError::Unretrievable => "unretrievable".to_string(),
         DocumentError::AlreadyExists => "already-exists".to_string(),
         DocumentError::NotJson => "not-json".to_string(),
         DocumentError::PathNotFound => "path-not-found".to_string(),
@@ -685,6 +687,18 @@ async fn scenario() -> Vec<String> {
                 },
                 Err(e) => format!("UNEXPECTED-ERR {}", describe(&e)),
             },
+        },
+    );
+
+    // Replica reads need a transport that addresses individual nodes. Either
+    // answer is coherent; silently returning the active copy as a replica read
+    // would not be.
+    r.push(
+        "34 get-any-replicas",
+        match document::get_any_replicas(k.to_string(), None).await {
+            Err(DocumentError::Unsupported(_)) => "OK unsupported on this transport".to_string(),
+            Ok(g) => format!("OK is-replica={} cas={}", g.is_replica, g.cas),
+            Err(e) => format!("UNEXPECTED-ERR {}", describe(&e)),
         },
     );
 
