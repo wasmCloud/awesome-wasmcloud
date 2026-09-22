@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 #
-# Runs one unmodified workload against BOTH implementations of
+# Runs one unmodified workload against ALL THREE implementations of
 # `wasmcloud:couchbase@0.2.0` and shows that it cannot tell them apart.
 #
 #   - the `couchbase` plugin, over the Data API's HTTPS surface -- served here
 #     by Couchbase's Cloud Native Gateway, the same gateway that fronts Capella
 #   - the `couchbase-kv-sdk` plugin, over the binary KV protocol, with the official
 #     Couchbase Rust SDK compiled to wasm and driven through wasi:sockets
+#   - the `couchbase-wasi-sockets-p3` plugin, over the same KV protocol with no
+#     SDK at all, speaking it directly on wasi:sockets@0.3.0
 #
-# The workload component is not rebuilt between the two runs. Only the host's
+# The workload component is not rebuilt between the three runs. Only the host's
 # plugin declaration changes.
 #
 # Usage:
-#   ./demo.sh                 # run both, diff them, tear down
+#   ./demo.sh                 # run all three, diff them, tear down
 #   ./demo.sh --keep          # leave the cluster up afterwards
 #   WASH=/path/to/wash ./demo.sh
 #   KV_TRANSPORT=loopback ./demo.sh    # KV over host.wasmcloud.internal
@@ -32,6 +34,7 @@ KEEP=0
 
 DATAAPI_WASM="$PLUGINS/couchbase/target/wasm32-wasip2/release/couchbase_plugin.wasm"
 KV_WASM="$PLUGINS/couchbase-kv-sdk/target/wasm32-wasip2/release/couchbase_kv_sdk_plugin.wasm"
+P3_WASM="$PLUGINS/couchbase-wasi-sockets-p3/target/wasm32-wasip2/release/couchbase_wasi_sockets_p3_plugin.wasm"
 CONFIG="$SCENARIO/.wash/config.yaml"
 OUT="$(mktemp -d)"
 DEVPID=""
@@ -51,7 +54,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# The build half of the workload's config, identical for both runs.
+# The build half of the workload's config, identical for every run.
 # `wasmcloud:couchbase@0.2.0` is not published, so it resolves from the repo.
 write_base_config() {
   mkdir -p "$SCENARIO/.wash"
@@ -112,7 +115,7 @@ until cng_ready; do
 done
 note "Couchbase and the Data API are ready, over TLS verified against tls/ca.crt"
 
-step "Building both plugins"
+step "Building all three plugins"
 build_plugin() {
   # Not --skip-fetch: wit/deps is generated, so a clean checkout has none and
   # skipping the fetch fails to resolve the world.
@@ -123,9 +126,11 @@ build_plugin() {
 }
 build_plugin "$PLUGINS/couchbase" couchbase
 build_plugin "$PLUGINS/couchbase-kv-sdk" couchbase-kv-sdk
+build_plugin "$PLUGINS/couchbase-wasi-sockets-p3" couchbase-wasi-sockets-p3
 note "wasmcloud:couchbase and wasmcloud:host resolve from the checkout, not a registry"
 note "$(basename "$DATAAPI_WASM") $(du -h "$DATAAPI_WASM" | cut -f1)"
 note "$(basename "$KV_WASM") $(du -h "$KV_WASM" | cut -f1)  <- embeds the Couchbase Rust SDK"
+note "$(basename "$P3_WASM") $(du -h "$P3_WASM" | cut -f1)  <- speaks the KV protocol itself"
 
 step "Resolving the workload's WIT dependencies"
 # `wash dev` deliberately skips WIT fetching, and wit/deps/ is generated rather
@@ -215,11 +220,11 @@ run_scenario() {
   fi
 }
 
-step "Run 1 of 2 — the same workload, over the Data API (HTTPS, via CNG)"
+step "Run 1 of 3 — the same workload, over the Data API (HTTPS, via CNG)"
 run_scenario "Data API" couchbase "$DATAAPI_WASM" "https://$HOSTADDR:18008" \
   "      allowedHosts: [\"$HOSTADDR:18008\"]" "$OUT/dataapi.txt"
 
-step "Run 2 of 2 — the same workload, over the binary KV protocol"
+step "Run 2 of 3 — the same workload, over the KV protocol via the Rust SDK"
 if [[ "$KV_TRANSPORT" == "loopback" ]]; then
   # Needs wasmCloud#5577. No allowedHosts and no allowedIpNameLookups are
   # required: the *.wasmcloud.internal zone resolves inside the host, ahead of
@@ -233,6 +238,20 @@ else
       allowedIpNameLookups: [\"*\"]" "$OUT/kv.txt"
 fi
 
+step "Run 3 of 3 — the same workload, over the KV protocol on wasi:sockets"
+# Same wire protocol as run 2, no SDK: the grants are identical because both
+# reach the cluster through wasi:sockets.
+if [[ "$KV_TRANSPORT" == "loopback" ]]; then
+  note "addressing the cluster as host.wasmcloud.internal (needs wasmCloud#5577)"
+  run_scenario "KV(sockets)" couchbase-wasi-sockets-p3 "$P3_WASM" \
+    "couchbase://host.wasmcloud.internal" \
+    "      allowedHostLoopbackPorts: [\"11210\", \"8093\"]" "$OUT/kv-p3.txt"
+else
+  run_scenario "KV(sockets)" couchbase-wasi-sockets-p3 "$P3_WASM" "couchbase://$HOSTADDR" \
+    "      allowedHosts: [\"$HOSTADDR:11210\", \"$HOSTADDR:8093\"]
+      allowedIpNameLookups: [\"*\"]" "$OUT/kv-p3.txt"
+fi
+
 # ---------------------------------------------------------------------------
 
 step "What the workload saw"
@@ -240,30 +259,38 @@ step "What the workload saw"
 mask() { sed 's/cas[0-9]*=[0-9]*/cas=./g; s/vbuuid=[0-9]*/vbuuid=./g; s/seq=[0-9]*/seq=./g' "$1"; }
 
 # Compared with awk rather than diff: the group-format options that would do
-# this in one call are GNU-only, and macOS ships BSD diff. Both files have one
-# line per scenario step, in the same order, so a positional compare is exact.
+# this in one call are GNU-only, and macOS ships BSD diff. All three files have
+# one line per scenario step, in the same order, so a positional compare is
+# exact. `FNR == 1` counts files portably, where `ARGIND` would be GNU-only.
 compare() {
   awk -v mode="$1" '
-    NR == FNR { a[FNR] = $0; next }
-    {
-      if ($0 == a[FNR]) { if (mode == "same") print "    " $0 }
-      else if (mode == "diff") {
-        printf "    Data API | %s\n         KV | %s\n\n", a[FNR], $0
+    FNR == 1 { f++ }
+    { line[f, FNR] = $0; if (FNR > n) n = FNR }
+    END {
+      for (i = 1; i <= n; i++) {
+        if (line[1, i] == line[2, i] && line[2, i] == line[3, i]) {
+          if (mode == "same") print "    " line[1, i]
+        } else if (mode == "diff") {
+          printf "    %12s | %s\n", "Data API", line[1, i]
+          printf "    %12s | %s\n", "KV (SDK)", line[2, i]
+          printf "    %12s | %s\n\n", "KV (sockets)", line[3, i]
+        }
       }
-    }' <(mask "$OUT/dataapi.txt") <(mask "$OUT/kv.txt")
+    }' <(mask "$OUT/dataapi.txt") <(mask "$OUT/kv.txt") <(mask "$OUT/kv-p3.txt")
 }
 
-bold "Identical on both transports:"
+bold "Identical on all three transports:"
 compare same
 
 echo
 bold "Where the transports genuinely differ:"
 note "The workload is unchanged. Each implementation reports what it can"
-note "actually do, and the scenario asserts the answer is coherent either way."
+note "actually do, and the scenario asserts the answer is coherent in every case."
 echo
 compare diff
 
 step "Done"
-note "Both implementations export the same WIT. The workload was byte-identical"
-note "across both runs — only the host's plugin declaration changed."
+note "All three implementations export the same WIT. The workload was"
+note "byte-identical across all three runs — only the host's plugin"
+note "declaration changed."
 note "Full output: $OUT"

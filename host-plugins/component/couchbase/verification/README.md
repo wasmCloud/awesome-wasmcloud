@@ -4,10 +4,10 @@ Runs the plugin against a real Couchbase cluster in a real wasmCloud host. The
 results are summarized in the project [README](../README.md#run-live).
 
 - `demo.sh` — the whole thing end to end, for showing someone. Brings the
-  stack up, builds both plugins, and runs the *same* workload against each in
-  turn, then prints what was identical and where the two transports genuinely
+  stack up, builds all three plugins, and runs the *same* workload against each
+  in turn, then prints what was identical and where the transports genuinely
   differ. `--keep` leaves the stack running; `KV_TRANSPORT=loopback` points
-  the KV plugin at `host.wasmcloud.internal` instead of the LAN address.
+  the KV plugins at `host.wasmcloud.internal` instead of the LAN address.
 - `docker-compose.yml` — the whole environment: a real Couchbase Server, an init
   step that configures it, and the **Cloud Native Gateway** in front of it,
   serving the Data API. One command, no manual setup.
@@ -15,17 +15,19 @@ results are summarized in the project [README](../README.md#run-live).
   `GET /` runs 34 steps and returns a line per step, so a single request
   exercises the whole capability across the store boundary.
 
-The scenario drives **both** implementations — the Data API plugin here and the
-[KV plugin](../../couchbase-kv-sdk/) — because they export the same interface, and
-both score 34/34. Where the two transports genuinely differ it asserts on
-coherence rather than on one fixed answer: `get-and-lock`/`unlock` and
-`preserve-expiry` either report `unsupported`, or work *and* are checked for
-having actually worked — the lock must refuse a wrong CAS and accept its own,
-and a preserved TTL must still be there on read-back. A step that only checked
-"returned ok" would pass on an implementation that silently dropped the option.
+The scenario drives **all three** implementations — the Data API plugin here,
+the [SDK KV plugin](../../couchbase-kv-sdk/) and the
+[wasi:sockets KV plugin](../../couchbase-wasi-sockets-p3/) — because they export
+the same interface, and all three score 34/34. Where the transports genuinely
+differ it asserts on coherence rather than on one fixed answer:
+`get-and-lock`/`unlock` and `preserve-expiry` either report `unsupported`, or
+work *and* are checked for having actually worked — the lock must refuse a wrong
+CAS and accept its own, and a preserved TTL must still be there on read-back. A
+step that only checked "returned ok" would pass on an implementation that
+silently dropped the option.
 
-The KV plugin talks to the cluster directly (`couchbase://<lan-host>`, ports
-11210 and 8093) and does not go through the gateway at all.
+Both KV plugins talk to the cluster directly (`couchbase://<lan-host>`, ports
+11210 and 8093) and do not go through the gateway at all.
 
 ## The Data API here is the real one
 
@@ -145,8 +147,8 @@ that plain egress already covers.
 
 A LAN *hostname* works too, and is worth preferring on a laptop whose address
 moves between networks. For the Data API plugin, remember the certificate: pass
-it to `CNG_SAN` as `DNS:<name>`. The KV plugin resolves the name through
-`wasi:sockets/ip-name-lookup`, so its declaration also needs
+it to `CNG_SAN` as `DNS:<name>`. The KV plugins resolve the name through
+`wasi:sockets/ip-name-lookup`, so their declarations also need
 `allowedIpNameLookups`:
 
 ```yaml
