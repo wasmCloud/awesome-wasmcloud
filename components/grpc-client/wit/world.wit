@@ -1,0 +1,13 @@
+package wasmcloud:grpc-client@0.1.0;
+
+/// An HTTP front door for a gRPC service.
+world grpc-client {
+    /// The gRPC call itself. gRPC is HTTP/2, so it needs no transport beyond
+    /// the one every component already has.
+    import wasi:http/client@0.3.0;
+    /// Where the gRPC endpoint is: `GRPC_AUTHORITY`, `GRPC_PLAINTEXT`,
+    /// `GRPC_TIMEOUT_MS`.
+    import wasi:cli/environment@0.3.0;
+
+    export wasi:http/handler@0.3.0;
+}
