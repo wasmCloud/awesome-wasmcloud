@@ -90,20 +90,6 @@ struct Component;
 /// What the server uses when a lock request names no duration.
 const DEFAULT_LOCK_SECONDS: u64 = 15;
 
-/// Refuse a per-call deadline this transport cannot enforce.
-///
-/// `couchbase` 1.0.1 takes no timeout on a document operation — only the query
-/// service does. Proceeding anyway would run the call on the SDK's own default
-/// while the caller believed in theirs, and because this plugin's calls
-/// serialize, one unbounded call stalls every other workload on the host.
-fn reject_unbounded_timeout(timeout_ns: Option<u64>) -> Result<(), DocumentError> {
-    match timeout_ns {
-        Some(ns) if ns > 0 => Err(DocumentError::Unsupported(
-            "a per-call timeout cannot be enforced on a document operation over the KV transport; the binding's `timeout-ms` bounds SQL++ queries, or use the Data API plugin".to_string(),
-        )),
-        _ => Ok(()),
-    }
-}
 
 /// Refuse a replica read this transport cannot serve.
 ///
@@ -137,6 +123,56 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 /// See the module docs: this blocks the plugin's whole store for the duration.
 fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     runtime().block_on(fut)
+}
+
+/// Why an operation failed before it produced an SDK result.
+enum OpError {
+    Sdk(CbError),
+    /// The deadline passed. The call is abandoned, not cancelled: the server
+    /// may still apply a write whose reply never arrived, which is what
+    /// `document-error.timeout` means everywhere else too.
+    Timeout,
+}
+
+impl From<CbError> for OpError {
+    fn from(e: CbError) -> Self {
+        Self::Sdk(e)
+    }
+}
+
+fn op_error_to_document_error(err: OpError) -> DocumentError {
+    match err {
+        OpError::Sdk(e) => to_document_error(e),
+        OpError::Timeout => DocumentError::Timeout,
+    }
+}
+
+/// Run one SDK future under a deadline.
+///
+/// `couchbase` 1.0.1 takes no timeout on a document operation, so the bound is
+/// applied here instead. That matters more for this transport than for the
+/// sibling: these calls hold the plugin's only store, so one call waiting
+/// forever stops every workload on the host.
+fn block_on_within<T>(
+    timeout_ms: u32,
+    fut: impl std::future::Future<Output = Result<T, CbError>>,
+) -> Result<T, OpError> {
+    let deadline = Duration::from_millis(u64::from(timeout_ms));
+    // Built inside `block_on`, not outside: a `Sleep` registers with the timer
+    // driver when it is constructed, so constructing one without a runtime
+    // context panics with `CONTEXT_MISSING_ERROR` before anything is awaited.
+    match block_on(async move { tokio::time::timeout(deadline, fut).await }) {
+        Ok(result) => result.map_err(OpError::Sdk),
+        Err(_elapsed) => Err(OpError::Timeout),
+    }
+}
+
+/// The deadline for one call: the caller's, or the binding's when unset.
+fn effective_timeout_ms(binding: &Binding, timeout_ns: Option<u64>) -> u32 {
+    match timeout_ns.unwrap_or(0) {
+        0 => binding.timeout_ms,
+        ns => ns.div_ceil(1_000_000).clamp(1, u64::from(u32::MAX)) as u32,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -289,7 +325,7 @@ fn connect(binding: &Binding) -> Result<(), ConnectError> {
 /// Run `f` against the collection this binding addresses.
 fn with_collection<T>(
     binding: &Binding,
-    f: impl FnOnce(Collection) -> Result<T, CbError>,
+    f: impl FnOnce(Collection) -> Result<T, OpError>,
 ) -> Result<T, DocumentError> {
     connect(binding).map_err(connect_error_to_document_error)?;
     let key = binding.connection_key();
@@ -312,7 +348,7 @@ fn with_collection<T>(
                 .scope(&binding.scope)
                 .collection(&binding.collection)
         };
-        f(collection).map_err(to_document_error)
+        f(collection).map_err(op_error_to_document_error)
     })
 }
 
@@ -518,7 +554,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentInsertOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
         let binding = caller_binding()?;
-        reject_unbounded_timeout(options.as_ref().and_then(|o| o.timeout_ns))?;
+        let deadline = effective_timeout_ms(&binding, options.as_ref().and_then(|o| o.timeout_ns));
         if let Some(o) = options.as_ref() {
             reject_unhonoured(o.persist_to, o.replicate_to)?;
         }
@@ -529,7 +565,7 @@ impl DocumentGuest for Component {
             let mut opts = couchbase::options::kv_options::InsertOptions::default();
             opts.expiry = expiry;
             opts.durability_level = level;
-            block_on(c.insert_raw(&id, &doc, flags, opts))
+            block_on_within(deadline, c.insert_raw(&id, &doc, flags, opts))
         })
         .map(|r| mutation(&binding, &r))
     }
@@ -540,7 +576,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentUpsertOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
         let binding = caller_binding()?;
-        reject_unbounded_timeout(options.as_ref().and_then(|o| o.timeout_ns))?;
+        let deadline = effective_timeout_ms(&binding, options.as_ref().and_then(|o| o.timeout_ns));
         if let Some(o) = options.as_ref() {
             reject_unhonoured(o.persist_to, o.replicate_to)?;
         }
@@ -553,7 +589,7 @@ impl DocumentGuest for Component {
             opts.expiry = expiry;
             opts.durability_level = level;
             opts.preserve_expiry = if preserve { Some(true) } else { None };
-            block_on(c.upsert_raw(&id, &doc, flags, opts))
+            block_on_within(deadline, c.upsert_raw(&id, &doc, flags, opts))
         })
         .map(|r| mutation(&binding, &r))
     }
@@ -564,7 +600,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentReplaceOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
         let binding = caller_binding()?;
-        reject_unbounded_timeout(options.as_ref().and_then(|o| o.timeout_ns))?;
+        let deadline = effective_timeout_ms(&binding, options.as_ref().and_then(|o| o.timeout_ns));
         if let Some(o) = options.as_ref() {
             reject_unhonoured(o.persist_to, o.replicate_to)?;
         }
@@ -579,7 +615,7 @@ impl DocumentGuest for Component {
             opts.durability_level = level;
             opts.preserve_expiry = if preserve { Some(true) } else { None };
             opts.cas = if cas == 0 { None } else { Some(cas) };
-            block_on(c.replace_raw(&id, &doc, flags, opts))
+            block_on_within(deadline, c.replace_raw(&id, &doc, flags, opts))
         })
         .map(|r| mutation(&binding, &r))
     }
@@ -589,7 +625,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentGetOptions>,
     ) -> Result<DocumentGetResult, DocumentError> {
         let binding = caller_binding()?;
-        reject_unbounded_timeout(options.as_ref().and_then(|o| o.timeout_ns))?;
+        let deadline = effective_timeout_ms(&binding, options.as_ref().and_then(|o| o.timeout_ns));
         // Projection and expiry are both the SDK's own `GetOptions`: it turns a
         // projection into a subdoc lookup, falls back to a full fetch past the
         // server's 16-path limit, and reassembles the projected document. Doing
@@ -606,7 +642,7 @@ impl DocumentGuest for Component {
             let mut opts = couchbase::options::kv_options::GetOptions::default();
             opts.projections = project;
             opts.expiry = if with_expiry { Some(true) } else { None };
-            block_on(c.get(&id, opts))
+            block_on_within(deadline, c.get(&id, opts))
         })
         .map(|r| get_result(&r))
     }
@@ -618,7 +654,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentRemoveOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
         let binding = caller_binding()?;
-        reject_unbounded_timeout(options.as_ref().and_then(|o| o.timeout_ns))?;
+        let deadline = effective_timeout_ms(&binding, options.as_ref().and_then(|o| o.timeout_ns));
         if let Some(o) = options.as_ref() {
             reject_unhonoured(o.persist_to, o.replicate_to)?;
         }
@@ -628,7 +664,7 @@ impl DocumentGuest for Component {
             let mut opts = couchbase::options::kv_options::RemoveOptions::default();
             opts.durability_level = level;
             opts.cas = if cas == 0 { None } else { Some(cas) };
-            block_on(c.remove(&id, opts))
+            block_on_within(deadline, c.remove(&id, opts))
         })
         .map(|r| mutation(&binding, &r))
     }
@@ -639,7 +675,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentGetAndLockOptions>,
     ) -> Result<DocumentGetResult, DocumentError> {
         let binding = caller_binding()?;
-        reject_unbounded_timeout(options.as_ref().and_then(|o| o.timeout_ns))?;
+        let deadline = effective_timeout_ms(&binding, options.as_ref().and_then(|o| o.timeout_ns));
         // `lock-time` is not an option in the WIT, so `0` is how a caller says
         // "use the default". Rounding it up to one second would hand back a
         // lock that lapses almost immediately.
@@ -648,7 +684,7 @@ impl DocumentGuest for Component {
             ns => Duration::from_secs(ns.div_ceil(1_000_000_000).max(1)),
         };
         with_collection(&binding, |c| {
-            block_on(c.get_and_lock(
+            block_on_within(deadline, c.get_and_lock(
                 &id,
                 lock_time,
                 couchbase::options::kv_options::GetAndLockOptions::default(),
@@ -663,7 +699,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentUnlockOptions>,
     ) -> Result<(), DocumentError> {
         let binding = caller_binding()?;
-        reject_unbounded_timeout(options.as_ref().and_then(|o| o.timeout_ns))?;
+        let deadline = effective_timeout_ms(&binding, options.as_ref().and_then(|o| o.timeout_ns));
         let cas = options.as_ref().map_or(0, |o| o.cas);
         if cas == 0 {
             return Err(DocumentError::InvalidArgument(
@@ -671,7 +707,7 @@ impl DocumentGuest for Component {
             ));
         }
         with_collection(&binding, |c| {
-            block_on(c.unlock(&id, cas, couchbase::options::kv_options::UnlockOptions::default()))
+            block_on_within(deadline, c.unlock(&id, cas, couchbase::options::kv_options::UnlockOptions::default()))
         })
     }
 
@@ -680,7 +716,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentTouchOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
         let binding = caller_binding()?;
-        reject_unbounded_timeout(options.as_ref().and_then(|o| o.timeout_ns))?;
+        let deadline = effective_timeout_ms(&binding, options.as_ref().and_then(|o| o.timeout_ns));
         let expires_in = options.as_ref().map_or(0, |o| o.expires_in);
         let Some(ttl) = expiry(expires_in) else {
             return Err(DocumentError::InvalidArgument(
@@ -688,7 +724,7 @@ impl DocumentGuest for Component {
             ));
         };
         let cas = with_collection(&binding, |c| {
-            block_on(c.touch(&id, ttl, couchbase::options::kv_options::TouchOptions::default()))
+            block_on_within(deadline, c.touch(&id, ttl, couchbase::options::kv_options::TouchOptions::default()))
                 .map(|r| r.cas())
         })?;
         Ok(MutationMetadata {
@@ -728,7 +764,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentGetAndTouchOptions>,
     ) -> Result<DocumentGetResult, DocumentError> {
         let binding = caller_binding()?;
-        reject_unbounded_timeout(options.as_ref().and_then(|o| o.timeout_ns))?;
+        let deadline = effective_timeout_ms(&binding, options.as_ref().and_then(|o| o.timeout_ns));
         let expires_in = options.as_ref().map_or(0, |o| o.expires_in);
         let Some(ttl) = expiry(expires_in) else {
             return Err(DocumentError::InvalidArgument(
@@ -736,7 +772,7 @@ impl DocumentGuest for Component {
             ));
         };
         with_collection(&binding, |c| {
-            block_on(c.get_and_touch(
+            block_on_within(deadline, c.get_and_touch(
                 &id,
                 ttl,
                 couchbase::options::kv_options::GetAndTouchOptions::default(),

@@ -69,6 +69,19 @@ or a panic far from their cause.
    and hands the SDK an address literal. That is what lets `endpoint` name a
    host at all.
 
+### Timeouts are the plugin's to enforce
+
+`couchbase` 1.0.1 takes no timeout on a document operation — only a query does,
+as `server_timeout`. So a document call runs under `tokio::time::timeout` here.
+That matters more for this transport than for the sibling: these calls hold the
+plugin's only store, so one call waiting forever stops every workload on the
+host.
+
+Build the timer inside `block_on`. A `Sleep` registers with the timer driver
+when it is constructed, so constructing one outside a runtime context panics
+with `CONTEXT_MISSING_ERROR` before anything is awaited — the same trap as
+`Cluster::bucket` above.
+
 ### The cost: calls serialize
 
 The SDK's futures want a Tokio context and the component-model executor is
@@ -93,7 +106,7 @@ Same keys as the sibling plugin, except `endpoint` takes a connection string:
 | `bucket` | yes | — | The one bucket this binding may reach. |
 | `username` / `password` | yes | — | Cluster access credential. Source the password from `secretFrom`. |
 | `scope` / `collection` | no | `_default` | Keyspace this binding operates in. |
-| `timeout-ms` | no | `30000` | Server-side limit for a SQL++ query. It does not reach document operations: the SDK takes no timeout on one, so a per-call `timeout-ns` on a document call is refused rather than ignored. |
+| `timeout-ms` | no | `30000` | Per-request time limit, overridden by a call's own `timeout-ns`. |
 
 A hostname `endpoint` needs `allowedIpNameLookups` to cover it, and
 `allowedHosts` to cover the resolved address and the cluster's ports (`11210`
