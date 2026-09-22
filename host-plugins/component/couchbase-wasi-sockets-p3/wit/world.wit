@@ -1,0 +1,30 @@
+package wasmcloud:couchbase-wasi-sockets-p3@0.1.0;
+
+/// A Couchbase host plugin that speaks the KV binary protocol directly.
+///
+/// No SDK and no gateway. Every socket operation is an `await` on
+/// `wasi:sockets@0.3.0`, so a call waiting on the cluster yields the plugin's
+/// executor instead of holding it.
+world couchbase-wasi-sockets-p3-plugin {
+    /// The KV connection itself.
+    import wasi:sockets/types@0.3.0;
+    /// Resolving the cluster's hostname.
+    import wasi:sockets/ip-name-lookup@0.3.0;
+    /// Per-call deadlines, since the protocol has none of its own.
+    import wasi:clocks/monotonic-clock@0.3.0;
+    /// SQL++ is an HTTP service, not a KV one.
+    import wasi:http/types@0.3.0;
+    import wasi:http/client@0.3.0;
+
+    /// Which workload is calling, so each gets its own cluster binding.
+    import wasmcloud:host/identity@0.1.1;
+    import wasmcloud:host/cancel@0.1.1;
+
+    /// Per-workload configuration, validated at deploy time.
+    export wasmcloud:host/workload-lifecycle@0.1.1;
+
+    export wasmcloud:couchbase/types@0.2.0;
+    export wasmcloud:couchbase/sqlpp-types@0.2.0;
+    export wasmcloud:couchbase/document@0.2.0;
+    export wasmcloud:couchbase/sqlpp@0.2.0;
+}

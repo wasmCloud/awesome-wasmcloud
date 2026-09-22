@@ -1,0 +1,37 @@
+[package]
+name = "couchbase-kv-sdk-plugin"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "wasmCloud component host plugin providing wasmcloud:couchbase over the Couchbase KV protocol"
+repository = "https://github.com/wasmCloud/awesome-wasmcloud"
+
+[lib]
+crate-type = ["cdylib"]
+name = "couchbase_kv_sdk_plugin"
+
+[dependencies]
+wit-bindgen = { version = "0.60.0", features = ["async-spawn", "inter-task-wakeup"] }
+# The official Couchbase Rust SDK, compiled into the component. Pure Rust, so it
+# targets wasm32 given `--cfg tokio_unstable` (see .cargo/config.toml).
+# `internal` is an empty feature that gates exactly one item we need:
+# `MutationToken::from_parts`, which is how a caller's `consistent-with` tokens
+# become an SDK `MutationState`. Without it there is no way to rebuild a token
+# the SDK did not itself hand out.
+couchbase = { version = "1.0.1", features = ["internal"] }
+# Only the features tokio supports on wasm; `net` comes from tokio_unstable.
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "time", "sync", "io-util"] }
+serde_json = "1.0"
+futures-lite = "2"
+chrono = { version = "0.4.45", default-features = false }
+
+[patch.crates-io]
+# One upstream call reads /etc/resolv.conf, which hickory does not compile for
+# wasm. See vendor/couchbase-connstr/WASM-PATCH.md.
+couchbase-connstr = { path = "vendor/couchbase-connstr" }
+
+[profile.release]
+opt-level = "s"
+strip = true
+
+[workspace]
