@@ -118,11 +118,16 @@ Host component plugins are opt-in: the host must be built with the
 `host-component-plugins` feature, which released builds do not carry.
 
 ```console
-$ wash build --skip-fetch
+$ wash build
 ```
 
-`wasmcloud:wash` is not published, so the interface is resolved locally and the
-fetch has to be skipped.
+Two of the packages this world uses are not in a registry:
+`wasmcloud:couchbase@0.2.0`, which lives in
+[`../couchbase/interface`](../couchbase/interface/), and `wasmcloud:host@0.1.1`,
+vendored under the sibling plugin's `wit-deps/`. Both are mapped in
+[`.wash/config.yaml`](.wash/config.yaml), so `wash build` resolves them from the
+checkout and fetches only the `wasi:*` packages. `--skip-fetch` additionally
+skips that registry round-trip, which is useful offline once `wit/deps/` exists.
 
 ## Egress
 

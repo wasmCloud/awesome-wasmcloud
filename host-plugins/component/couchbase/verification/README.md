@@ -84,8 +84,7 @@ git clone https://github.com/wasmCloud/wasmCloud && cd wasmCloud
 cargo build --bin wash --features host-component-plugins
 ```
 
-**3. The scenario.** Build the plugin (`wash build --skip-fetch` in the project
-root), then give `scenario/.wash/config.yaml` the WIT source, the CA, the plugin
+**3. The scenario.** Build the plugin (`wash build` in the project root), then give `scenario/.wash/config.yaml` the WIT source, the CA, the plugin
 and its interface config. `wasmcloud:couchbase@0.2.0` is not published, so it
 resolves from `../../interface`; run `wash wit fetch` once in `scenario/`,
 because `wash dev` deliberately does not fetch.
