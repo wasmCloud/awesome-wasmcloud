@@ -93,7 +93,7 @@ Same keys as the sibling plugin, except `endpoint` takes a connection string:
 | `bucket` | yes | — | The one bucket this binding may reach. |
 | `username` / `password` | yes | — | Cluster access credential. Source the password from `secretFrom`. |
 | `scope` / `collection` | no | `_default` | Keyspace this binding operates in. |
-| `timeout-ms` | no | `30000` | Per-request time limit. |
+| `timeout-ms` | no | `30000` | Server-side limit for a SQL++ query. It does not reach document operations: the SDK takes no timeout on one, so a per-call `timeout-ns` on a document call is refused rather than ignored. |
 
 A hostname `endpoint` needs `allowedIpNameLookups` to cover it, and
 `allowedHosts` to cover the resolved address and the cluster's ports (`11210`

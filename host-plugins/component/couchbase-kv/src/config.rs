@@ -7,7 +7,11 @@
 /// Couchbase's own name for the scope and collection every bucket starts with.
 const DEFAULT_NAME: &str = "_default";
 
-/// Requests wait this long by default before giving up on the cluster.
+/// How long a SQL++ query may run before the server gives up.
+///
+/// It does not reach document operations: `couchbase` 1.0.1 takes no timeout on
+/// one, so those run under the SDK's own defaults and a per-call `timeout-ns`
+/// is refused rather than silently dropped.
 const DEFAULT_TIMEOUT_MS: u32 = 30_000;
 
 /// A validated Couchbase binding for one workload.

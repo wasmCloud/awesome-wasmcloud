@@ -28,7 +28,7 @@ use bindings::exports::wasmcloud::couchbase::sqlpp::{
 };
 use bindings::exports::wasmcloud::couchbase::sqlpp_types::SqlppQueryError;
 use bindings::exports::wasmcloud::couchbase::types::{
-    Document, DocumentError, DurabilityLevel, MutationMetadata, Time,
+    Document, DocumentError, DurabilityLevel, MutationMetadata, ReplicaReadLevel, Time,
 };
 use bindings::exports::wasmcloud::host::workload_lifecycle::{
     Guest as LifecycleGuest, WorkloadInfo,
@@ -634,6 +634,17 @@ impl DocumentGuest for Component {
         options: Option<DocumentGetOptions>,
     ) -> Result<DocumentGetResult, DocumentError> {
         let binding = caller_binding()?;
+        if matches!(
+            options.as_ref().and_then(|o| o.use_replica),
+            Some(ReplicaReadLevel::On)
+        ) {
+            // Serving the active copy instead would answer a different
+            // question: a replica read trades freshness for availability, and
+            // this transport cannot make that trade.
+            return Err(DocumentError::Unsupported(
+                "reading from a replica needs a transport that addresses individual nodes; the Data API has no replica endpoint".to_string(),
+            ));
+        }
 
         let binding = binding.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
         let mut path = document_path(&binding, &id);

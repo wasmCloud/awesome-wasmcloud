@@ -71,7 +71,18 @@ pub fn classify(status: u16, body: &[u8]) -> Failure {
         .clone()
         .or_else(|| parsed.errors.first().and_then(|e| e.code.map(|c| c.to_string())));
 
+    // The query service answers with its own numeric codes rather than the
+    // Data API's names, and does so under HTTP 200 with an `errors` array. Left
+    // unmapped they fall through to the status arms, where 200 matches nothing
+    // and a plain syntax error is reported as a cluster fault.
     if let Some(code) = code.as_deref() {
+        match code {
+            // https://docs.couchbase.com/server/current/n1ql/n1ql-language-reference/n1ql-error-codes.html
+            "3000" => return Failure::InvalidArgument(message),
+            "12003" | "12021" => return Failure::NotFound,
+            "13014" => return Failure::Unauthorized,
+            _ => {}
+        }
         match code {
             // The code set is the `ErrorCode` enum in the Data API's OpenAPI
             // spec; anything outside it falls through to the status mapping.
@@ -364,13 +375,28 @@ mod tests {
 
     #[test]
     fn reads_query_service_error_arrays() {
+        // A malformed statement is the caller's mistake whatever status
+        // carries it, so the query service's own code decides over the status.
         let body = br#"{"errors":[{"code":3000,"msg":"syntax error - line 1, column 7"}],"status":"fatal"}"#;
         assert_eq!(
             classify(500, body),
+            Failure::InvalidArgument("syntax error - line 1, column 7".to_string())
+        );
+
+        // A missing keyspace is `not-found`, which the query path renders as
+        // an invalid statement rather than a missing document.
+        let keyspace = br#"{"errors":[{"code":12003,"msg":"Keyspace not found"}]}"#;
+        assert_eq!(classify(404, keyspace), Failure::NotFound);
+
+        // An unmapped query code still falls through to the status, carrying
+        // both parts of the array entry.
+        let other = br#"{"errors":[{"code":5000,"msg":"internal error"}]}"#;
+        assert_eq!(
+            classify(500, other),
             Failure::Server {
                 status: 500,
-                code: Some("3000".to_string()),
-                message: "syntax error - line 1, column 7".to_string(),
+                code: Some("5000".to_string()),
+                message: "internal error".to_string(),
             }
         );
     }
