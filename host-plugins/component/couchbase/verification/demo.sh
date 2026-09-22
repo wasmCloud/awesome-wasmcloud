@@ -114,14 +114,16 @@ note "Couchbase and the Data API are ready, over TLS verified against tls/ca.crt
 
 step "Building both plugins"
 build_plugin() {
-  if ! (cd "$1" && "$WASH" build --skip-fetch > "$OUT/build-$2.log" 2>&1); then
+  # Not --skip-fetch: wit/deps is generated, so a clean checkout has none and
+  # skipping the fetch fails to resolve the world.
+  if ! (cd "$1" && "$WASH" build > "$OUT/build-$2.log" 2>&1); then
     tail -20 "$OUT/build-$2.log" | sed 's/^/    /'
     die "$2 plugin build failed"
   fi
 }
 build_plugin "$PLUGINS/couchbase" couchbase
 build_plugin "$PLUGINS/couchbase-kv" couchbase-kv
-note "wasmcloud:wash is unpublished, hence --skip-fetch"
+note "wasmcloud:couchbase and wasmcloud:host resolve from the checkout, not a registry"
 note "$(basename "$DATAAPI_WASM") $(du -h "$DATAAPI_WASM" | cut -f1)"
 note "$(basename "$KV_WASM") $(du -h "$KV_WASM" | cut -f1)  <- embeds the Couchbase Rust SDK"
 
