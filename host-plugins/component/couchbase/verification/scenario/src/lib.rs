@@ -567,19 +567,25 @@ async fn scenario() -> Vec<String> {
         describe_query,
     );
 
-    // A per-call timeout is honoured rather than replaced by the binding's.
-    r.ok(
-        "27 per-call-timeout-honoured",
-        document::get(
+    // A per-call timeout is honoured, or refused. Accepting it and then not
+    // enforcing it would leave the caller believing in a bound that is not there.
+    r.push(
+        "27 per-call-timeout",
+        match document::get(
             "scenario:ttl".to_string(),
             Some(DocumentGetOptions {
                 timeout_ns: Some(20 * 1_000_000_000),
                 ..get_opts(None)
             }),
         )
-        .await,
-        |_| "completed within the per-call budget".to_string(),
-        describe,
+        .await
+        {
+            Ok(_) => "OK completed within the per-call budget".to_string(),
+            Err(DocumentError::Unsupported(_)) => {
+                "OK refused: this transport cannot bound a document call".to_string()
+            }
+            Err(e) => format!("UNEXPECTED-ERR {}", describe(&e)),
+        },
     );
 
     // A genuinely binary document: bytes that are not valid UTF-8, stored with

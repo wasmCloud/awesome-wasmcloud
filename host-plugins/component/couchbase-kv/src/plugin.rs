@@ -64,7 +64,7 @@ use bindings::exports::wasmcloud::couchbase::sqlpp::{
 };
 use bindings::exports::wasmcloud::couchbase::sqlpp_types::SqlppQueryError;
 use bindings::exports::wasmcloud::couchbase::types::{
-    DocumentError, DurabilityLevel, MutationMetadata,
+    DocumentError, DurabilityLevel, MutationMetadata, ReplicaReadLevel,
 };
 use bindings::exports::wasmcloud::host::workload_lifecycle::{
     Guest as LifecycleGuest, WorkloadInfo,
@@ -86,6 +86,38 @@ thread_local! {
 }
 
 struct Component;
+
+/// What the server uses when a lock request names no duration.
+const DEFAULT_LOCK_SECONDS: u64 = 15;
+
+/// Refuse a per-call deadline this transport cannot enforce.
+///
+/// `couchbase` 1.0.1 takes no timeout on a document operation — only the query
+/// service does. Proceeding anyway would run the call on the SDK's own default
+/// while the caller believed in theirs, and because this plugin's calls
+/// serialize, one unbounded call stalls every other workload on the host.
+fn reject_unbounded_timeout(timeout_ns: Option<u64>) -> Result<(), DocumentError> {
+    match timeout_ns {
+        Some(ns) if ns > 0 => Err(DocumentError::Unsupported(
+            "a per-call timeout cannot be enforced on a document operation over the KV transport; the binding's `timeout-ms` bounds SQL++ queries, or use the Data API plugin".to_string(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Refuse a replica read this transport cannot serve.
+///
+/// Returning the active copy instead would answer a question the caller did
+/// not ask: a replica read trades freshness for availability, and silently
+/// serving the active node hides that the trade did not happen.
+fn reject_replica_read(level: Option<ReplicaReadLevel>) -> Result<(), DocumentError> {
+    match level {
+        Some(ReplicaReadLevel::On) => Err(DocumentError::Unsupported(
+            "the Couchbase Rust SDK exposes no replica read".to_string(),
+        )),
+        _ => Ok(()),
+    }
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -468,8 +500,10 @@ fn to_wit_time(t: &chrono::DateTime<chrono::Utc>) -> bindings::exports::wasmclou
         hour: t.hour() as u8,
         minute: t.minute() as u8,
         second: t.second() as u8,
+        // These are separate units, not two views of the same value: a
+        // consumer adding both must not double-count the milliseconds.
         milliseconds: t.nanosecond() / 1_000_000,
-        nanoseconds: t.nanosecond(),
+        nanoseconds: t.nanosecond() % 1_000_000,
     }
 }
 
@@ -484,6 +518,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentInsertOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
         let binding = caller_binding()?;
+        reject_unbounded_timeout(options.as_ref().and_then(|o| o.timeout_ns))?;
         if let Some(o) = options.as_ref() {
             reject_unhonoured(o.persist_to, o.replicate_to)?;
         }
@@ -505,6 +540,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentUpsertOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
         let binding = caller_binding()?;
+        reject_unbounded_timeout(options.as_ref().and_then(|o| o.timeout_ns))?;
         if let Some(o) = options.as_ref() {
             reject_unhonoured(o.persist_to, o.replicate_to)?;
         }
@@ -528,6 +564,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentReplaceOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
         let binding = caller_binding()?;
+        reject_unbounded_timeout(options.as_ref().and_then(|o| o.timeout_ns))?;
         if let Some(o) = options.as_ref() {
             reject_unhonoured(o.persist_to, o.replicate_to)?;
         }
@@ -552,6 +589,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentGetOptions>,
     ) -> Result<DocumentGetResult, DocumentError> {
         let binding = caller_binding()?;
+        reject_unbounded_timeout(options.as_ref().and_then(|o| o.timeout_ns))?;
         // Projection and expiry are both the SDK's own `GetOptions`: it turns a
         // projection into a subdoc lookup, falls back to a full fetch past the
         // server's 16-path limit, and reassembles the projected document. Doing
@@ -562,6 +600,7 @@ impl DocumentGuest for Component {
             .map(|p| p.iter().filter(|p| !p.is_empty()).cloned().collect::<Vec<_>>())
             .filter(|p| !p.is_empty());
         let with_expiry = options.as_ref().is_some_and(|o| o.with_expiry);
+        reject_replica_read(options.as_ref().and_then(|o| o.use_replica))?;
 
         with_collection(&binding, |c| {
             let mut opts = couchbase::options::kv_options::GetOptions::default();
@@ -579,6 +618,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentRemoveOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
         let binding = caller_binding()?;
+        reject_unbounded_timeout(options.as_ref().and_then(|o| o.timeout_ns))?;
         if let Some(o) = options.as_ref() {
             reject_unhonoured(o.persist_to, o.replicate_to)?;
         }
@@ -599,11 +639,14 @@ impl DocumentGuest for Component {
         options: Option<DocumentGetAndLockOptions>,
     ) -> Result<DocumentGetResult, DocumentError> {
         let binding = caller_binding()?;
-        let lock_time = options
-            .as_ref()
-            .map_or(Duration::from_secs(15), |o| {
-                Duration::from_secs(o.lock_time.div_ceil(1_000_000_000).max(1))
-            });
+        reject_unbounded_timeout(options.as_ref().and_then(|o| o.timeout_ns))?;
+        // `lock-time` is not an option in the WIT, so `0` is how a caller says
+        // "use the default". Rounding it up to one second would hand back a
+        // lock that lapses almost immediately.
+        let lock_time = match options.as_ref().map_or(0, |o| o.lock_time) {
+            0 => Duration::from_secs(DEFAULT_LOCK_SECONDS),
+            ns => Duration::from_secs(ns.div_ceil(1_000_000_000).max(1)),
+        };
         with_collection(&binding, |c| {
             block_on(c.get_and_lock(
                 &id,
@@ -620,6 +663,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentUnlockOptions>,
     ) -> Result<(), DocumentError> {
         let binding = caller_binding()?;
+        reject_unbounded_timeout(options.as_ref().and_then(|o| o.timeout_ns))?;
         let cas = options.as_ref().map_or(0, |o| o.cas);
         if cas == 0 {
             return Err(DocumentError::InvalidArgument(
@@ -636,6 +680,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentTouchOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
         let binding = caller_binding()?;
+        reject_unbounded_timeout(options.as_ref().and_then(|o| o.timeout_ns))?;
         let expires_in = options.as_ref().map_or(0, |o| o.expires_in);
         let Some(ttl) = expiry(expires_in) else {
             return Err(DocumentError::InvalidArgument(
@@ -683,6 +728,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentGetAndTouchOptions>,
     ) -> Result<DocumentGetResult, DocumentError> {
         let binding = caller_binding()?;
+        reject_unbounded_timeout(options.as_ref().and_then(|o| o.timeout_ns))?;
         let expires_in = options.as_ref().map_or(0, |o| o.expires_in);
         let Some(ttl) = expiry(expires_in) else {
             return Err(DocumentError::InvalidArgument(
@@ -791,6 +837,11 @@ impl SqlppGuest for Component {
     ) -> Result<SqlppValue, SqlppQueryError> {
         let binding = caller_binding().map_err(document_error_as_query_error)?;
         let scan_consistency = query_scan_consistency(options.as_ref(), &binding)?;
+        // A per-call timeout overrides the binding's; `0` means unset.
+        let timeout_ms = match options.as_ref().map_or(0, |o| o.timeout_ns) {
+            0 => binding.timeout_ms,
+            ns => ns.div_ceil(1_000_000).clamp(1, u64::from(u32::MAX)) as u32,
+        };
 
         let mut args = Vec::with_capacity(params.len());
         for (index, param) in params.iter().enumerate() {
@@ -811,6 +862,7 @@ impl SqlppGuest for Component {
                 opts.positional_parameters = Some(args);
             }
             opts.scan_consistency = scan_consistency;
+            opts.server_timeout = Some(Duration::from_millis(u64::from(timeout_ms)));
             block_on(async {
                 let mut result = scope.query(&query, opts).await.map_err(to_query_error)?;
                 // `rows` is a Stream, so it is drained rather than iterated.
