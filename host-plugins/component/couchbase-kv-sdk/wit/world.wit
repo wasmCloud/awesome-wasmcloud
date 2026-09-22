@@ -1,4 +1,4 @@
-package wasmcloud:couchbase-kv-plugin@0.1.0;
+package wasmcloud:couchbase-kv-sdk-plugin@0.1.0;
 
 /// The Couchbase component host plugin that speaks the binary KV protocol.
 ///
@@ -12,7 +12,7 @@ package wasmcloud:couchbase-kv-plugin@0.1.0;
 /// That buys the operations the Data API has no endpoint for — pessimistic
 /// locking and replica reads — and works against self-hosted Couchbase, which
 /// has no Data API at all.
-world couchbase-kv-plugin {
+world couchbase-kv-sdk-plugin {
     /// The SDK opens its own TCP connections. TLS is terminated *inside* the
     /// component by the SDK's own rustls, not by the host — so this needs no
     /// `wasi:tls` import, and a host serving this plugin does not need to be

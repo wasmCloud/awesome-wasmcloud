@@ -439,7 +439,7 @@ A real mutation token parses structurally
 ### Still unverified
 
 - **`couchbases://` against Capella.** This implementation speaks the Data API
-  over HTTPS. The sibling [`couchbase-kv`](../couchbase-kv/) plugin speaks the
+  over HTTPS. The sibling [`couchbase-kv-sdk`](../couchbase-kv-sdk/) plugin speaks the
   binary KV protocol and serves what this one cannot, but has so far been run
   only against a self-hosted cluster.
 - **Durability levels beyond the default.** `X-CB-DurabilityLevel` is sent but

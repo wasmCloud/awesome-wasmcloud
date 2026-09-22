@@ -32,7 +32,7 @@ dist/
 vendor/
 # ...but this Rust crate is patched in by path, so it has to be in the tree or
 # the plugin does not build from a clone.
-!host-plugins/component/couchbase-kv/vendor/
+!host-plugins/component/couchbase-kv-sdk/vendor/
 
 # JavaScript / TypeScript
 node_modules/

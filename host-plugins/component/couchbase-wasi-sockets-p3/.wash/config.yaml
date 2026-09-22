@@ -1,0 +1,12 @@
+version: 2.0.0
+
+wit:
+  sources:
+    # The same interface definition the sibling plugins export, so the three
+    # cannot drift.
+    "wasmcloud:couchbase": ../couchbase/interface
+    "wasmcloud:host": ../couchbase/wit-deps/wasmcloud-host
+
+build:
+  command: cargo build --target wasm32-wasip2 --release
+  component_path: target/wasm32-wasip2/release/couchbase_wasi_sockets_p3_plugin.wasm
