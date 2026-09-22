@@ -28,7 +28,7 @@ wash build
 
 Reusable WebAssembly components that implement a WIT interface. Hosted projects live in [`components/`](components/).
 
-_Nothing here yet. [Add the first one](CONTRIBUTING.md)._
+- [grpc-client](components/grpc-client/) (hosted): Calls a gRPC service from a component over `wasi:http/client@0.3.0`, exposing it as an HTTP endpoint that takes and returns protobuf messages. The transport module handles gRPC framing and resolves `grpc-status` from either headers or trailers, and depends on no protobuf crate.
 
 ## Host Plugins
 
