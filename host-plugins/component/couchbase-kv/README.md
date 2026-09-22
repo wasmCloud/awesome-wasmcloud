@@ -3,16 +3,16 @@
 A second implementation of `wasmcloud:couchbase@0.2.0` — the *same* interface
 the sibling plugin exports, so a workload cannot tell which is serving it —
 reaching Couchbase over the binary KV protocol with `couchbases://` instead of
-over the Capella Data API's HTTPS surface.
+over the Data API's HTTPS surface.
 
 The interface is not copied. [`.wash/config.yaml`](.wash/config.yaml) resolves
 `wasmcloud:couchbase` from `../couchbase/interface`, so the two implementations
 cannot drift.
 
 **Status: working.** It embeds the official Couchbase Rust SDK, compiles to
-`wasm32-wasip2`, loads as a host component plugin, and scores 33/33 on the
+`wasm32-wasip2`, loads as a host component plugin, and scores 34/34 on the
 shared verification scenario against a real cluster — the same scenario the
-sibling plugin also scores 33/33 on. See
+sibling plugin also scores 34/34 on. See
 [`../couchbase/verification/`](../couchbase/verification/).
 
 ## Why this exists
@@ -23,18 +23,16 @@ transport:
 
 - needs **no gateway** in front of the cluster: it talks to the data and query
   services directly;
-- serves **`get-and-lock` / `unlock`**, which the stable Data API has no
-  endpoint for and the sibling plugin reports as `unsupported`. (CNG does carry
-  `/v1.alpha/.../lock` and `/unlock`, behind `--alpha-endpoints`; the sibling
-  does not use alpha endpoints, which Capella need not expose);
+- serves **`get-and-lock` / `unlock`** on the stable protocol, where the Data
+  API has them only under `/v1.alpha`, behind a gateway flag Capella need not
+  set;
 - honours **`preserve-expiry`**, which the Data API cannot express;
 - avoids an HTTP hop for what is natively a binary protocol.
 
 ## Getting the SDK into a component
 
-Four obstacles, all solved. The first two are build-time and the last two are
-the ones that cost real time, because each presents as a hang or a panic far
-from its cause.
+Four constraints. The first two are build-time; the last two present as a hang
+or a panic far from their cause.
 
 1. **Tokio does not build for `wasm32` by default.** Its socket support is gated
    behind `--cfg tokio_unstable`, set for this target in
@@ -69,7 +67,7 @@ from its cause.
    `wasi:sockets/ip-name-lookup` directly, which the host grants through
    `allowedIpNameLookups`. `resolve_endpoint` resolves the name in the plugin
    and hands the SDK an address literal. That is what lets `endpoint` name a
-   host at all; verified end to end with `couchbase://macbookpro.lan`.
+   host at all.
 
 ### The cost: calls serialize
 
@@ -113,15 +111,13 @@ $ wash build --skip-fetch
 `wasmcloud:wash` is not published, so the interface is resolved locally and the
 fetch has to be skipped.
 
-## Egress, as of wasmCloud `main`
+## Egress
 
-Socket egress landed, and a plugin now gets a truthful, immediate answer where
-it previously hung for 60s. Measured from inside a plugin export with an awaited
-p3 connect:
+Measured from inside a plugin export with an awaited p3 connect:
 
 | Target | Result |
 |---|---|
-| `127.0.0.1:11210` | `ConnectionRefused` — the **virtual** network, which is what `127.0.0.1` now means for a guest |
+| `127.0.0.1:11210` | `ConnectionRefused` — the **virtual** network, which is what `127.0.0.1` means for a guest |
 | `127.255.255.254:11210` (the `host.wasmcloud.internal` sentinel) | `AccessDenied` — gated, and see the gap below |
 | a public address | `RemoteUnreachable` — the policy permitted it; the address genuinely was not reachable |
 
@@ -140,8 +136,7 @@ what lets this plugin talk to a cluster on the developer's own machine:
         endpoint: couchbase://host.wasmcloud.internal
 ```
 
-Verified 32/32 that way. It needs **neither `allowedHosts` nor
-`allowedIpNameLookups`**: the `*.wasmcloud.internal` zone is resolved inside the
+It needs **neither `allowedHosts` nor `allowedIpNameLookups`**: the `*.wasmcloud.internal` zone is resolved inside the
 host, ahead of the name allowlist, and the grant is checked at connect where it
 belongs. `wash dev` enables the host-wide gate already, so the per-plugin list
 is the only declaration needed.
@@ -156,9 +151,9 @@ over `wasi:http`: that path never resolves the sentinel
 `allowedHosts` as deny-all. For an HTTP-based plugin, address the host service
 by the machine's **LAN IP or LAN hostname** instead. Docker publishes on
 `0.0.0.0`, and a LAN address is an ordinary external address that plain egress
-already permits — verified 32/32 that way, versus 9/31 via `127.0.0.1`.
+already permits.
 
-Two smaller notes for whoever picks this up:
+Two smaller notes:
 
 - **A p3 socket import forces the whole `wasi:sockets` package to 0.3.0.**
   Declaring `wasi:sockets/...@0.2.0` alongside it fails to resolve. The p2

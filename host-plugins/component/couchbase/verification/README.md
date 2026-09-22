@@ -1,8 +1,7 @@
 # Verification harness
 
-What was used to run the plugin against a real Couchbase cluster in a real
-wasmCloud host. The results are summarized in the project
-[README](../README.md#run-live); this is how to reproduce them.
+Runs the plugin against a real Couchbase cluster in a real wasmCloud host. The
+results are summarized in the project [README](../README.md#run-live).
 
 - `demo.sh` — the whole thing end to end, for showing someone. Brings the
   stack up, builds both plugins, and runs the *same* workload against each in
@@ -13,12 +12,12 @@ wasmCloud host. The results are summarized in the project
   step that configures it, and the **Cloud Native Gateway** in front of it,
   serving the Data API. One command, no manual setup.
 - `scenario/` — a workload component importing `wasmcloud:couchbase`. One
-  `GET /` runs 33 steps and returns a line per step, so a single request
+  `GET /` runs 34 steps and returns a line per step, so a single request
   exercises the whole capability across the store boundary.
 
 The scenario drives **both** implementations — the Data API plugin here and the
 [KV plugin](../../couchbase-kv/) — because they export the same interface, and
-both score 33/33. Where the two transports genuinely differ it asserts on
+both score 34/34. Where the two transports genuinely differ it asserts on
 coherence rather than on one fixed answer: `get-and-lock`/`unlock` and
 `preserve-expiry` either report `unsupported`, or work *and* are checked for
 having actually worked — the lock must refuse a wrong CAS and accept its own,
@@ -30,31 +29,25 @@ The KV plugin talks to the cluster directly (`couchbase://<lan-host>`, ports
 
 ## The Data API here is the real one
 
-The Data API is not part of Couchbase Server — every `/v1/...` path 404s on
-Server itself — but it is not Capella-only either. It is served by the
+The Data API is served by the
 [Cloud Native Gateway](https://docs.couchbase.com/cloud-native-gateway/current/intro/about-cng.html)
 (CNG, [`couchbase/stellar-gateway`](https://github.com/couchbase/stellar-gateway)),
-which also serves Protostellar gRPC. The public
-`couchbase/cloud-native-gateway` image runs standalone next to any cluster, so
-this stack needs neither Kubernetes nor the operator.
+which fronts Capella and runs self-hosted in front of any cluster. It also
+serves Protostellar gRPC. Couchbase Server does not serve the Data API itself.
 
-That makes this a test against the actual implementation rather than a reading
-of its documentation. The formats that had to be discovered against live
-Capella come back from CNG byte for byte: the ETag is bare 16-digit hex
-(`18d67903e6ef0000`), and the mutation token is `bucket:vbid:vbuuid:seqno`
-(`testbucket:663:6268d18e82e2:4`). The plugin needed no change to pass here.
+The public `couchbase/cloud-native-gateway` image runs standalone, so this stack
+needs neither Kubernetes nor the operator.
 
-It did expose one gap. A read reports a document's absolute expiry in an
-`Expires` header, which the plugin had been ignoring — `with-expiry` always
-came back empty. Step 31 now checks it. CNG writes that header's zone as
-`UTC` where HTTP-date requires `GMT`, so a strict HTTP-date parser would reject
-every value it sends; the plugin's is lenient about exactly that.
+So this tests the actual implementation, not a reading of its documentation.
+The formats are the ones live Capella sends: a bare 16-digit hex ETag
+(`18d67903e6ef0000`), and a `bucket:vbid:vbuuid:seqno` mutation token
+(`testbucket:663:6268d18e82e2:4`).
 
-**Earlier revisions of this harness said the opposite** — that no Couchbase
-release ships the Data API — and stood in a hand-written Python server
-implementing the published reference. That server is gone. Its limit was the
-one this replaces: it could only confirm the plugin agreed with the same reading
-of the reference the plugin already held.
+Locking lives under `/v1.alpha` and needs CNG's `--alpha-endpoints`, which
+this stack passes. A read reports a document's absolute expiry in an `Expires`
+header, checked by step 31. CNG writes that header's zone as `UTC` where HTTP-date requires `GMT`,
+so a strict HTTP-date parser rejects every value it sends; the plugin's accepts
+both.
 
 ## Running it
 
@@ -165,13 +158,10 @@ it to `CNG_SAN` as `DNS:<name>`. The KV plugin resolves the name through
 
 ## Seeing what went on the wire
 
-The Python server this harness used to run logged every request's method,
-framing headers and options at `/__log`. That went with it, and CNG has no
-equivalent. The log earned its place once: it is how the missing
-`Content-Length` was found, when every request was going out
-`Transfer-Encoding: chunked`, body-less `DELETE`s included. After a change to
-the request path, a capture of the plugin's traffic is now the way to check —
-which, the Data API being HTTPS, means doing it on the host side of TLS.
+CNG does not log requests, and the Data API is HTTPS, so checking the plugin's
+framing means capturing its traffic on the host side of TLS. Worth doing after
+any change to the request path: request framing is easy to break without failing
+a single scenario step.
 
 ## Checking the cluster directly
 

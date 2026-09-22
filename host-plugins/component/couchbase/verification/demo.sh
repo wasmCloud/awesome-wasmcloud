@@ -82,7 +82,7 @@ HOSTADDR="$(ipconfig getifaddr en0 2>/dev/null || hostname -I 2>/dev/null | awk 
 note "cluster will be addressed as $HOSTADDR"
 
 step "Bringing up Couchbase Server, fronted by the Cloud Native Gateway"
-note "CNG serves the Data API -- the real one, not a stand-in -- on :18008."
+note "CNG serves the Data API on :18008."
 # Never swallow this: on failure `set -e` jumps straight to the cleanup trap,
 # and a hidden error here looks exactly like a hang much later on.
 # CNG_SAN puts the address the plugin will dial into CNG's certificate.

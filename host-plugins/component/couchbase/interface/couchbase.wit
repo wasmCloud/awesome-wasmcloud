@@ -46,6 +46,12 @@ interface types {
   /// Name of a search index
   type search-index-name = string;
 
+  /// Whether an operation may read from a replica.
+  enum replica-read-level {
+    off,
+    on,
+  }
+
   /// Direction in which to perform sorting
   enum sort-direction {
     asc,
@@ -85,12 +91,12 @@ interface types {
     /// CAS revision submitted to operation does not match value on server
     cas-mismatch,
     /// A write was refused because another client holds a lock on the
-    /// document. Nothing here takes locks — there is no Data API endpoint for
-    /// it — but an SDK client against the same cluster can, and the Data API
-    /// reports `DocumentLocked` when one is in the way.
+    /// document.
     locked,
     /// An operation expected the document to be locked and it was not.
     not-locked,
+    /// The document could not be retrieved from any replica.
+    unretrievable,
     /// Document already exists (i.e. a duplicate)
     already-exists,
     /// Document is not JSON
@@ -348,7 +354,7 @@ interface sqlpp-types {
 interface document {
   use types.{
       document, document-flags, document-id, document-error, mutation-metadata, time, durability-level,
-      retry-strategy, request-span
+      retry-strategy, request-span, replica-read-level
   };
 
   /////////////////////////
@@ -509,6 +515,9 @@ interface document {
     /// the fields indicated by the given list of paths.
     project: option<list<string>>,
 
+    /// Whether this read may be served by a replica.
+    use-replica: option<replica-read-level>,
+
     /// Timeout that should be used, in nanoseconds
     timeout-ns: option<u64>,
 
@@ -519,7 +528,29 @@ interface document {
     parent-span: option<request-span>,
   }
 
+  /// Options for retrieving a document from any replica
+  record document-get-any-replica-options {
+    /// Timeout that should be used, in nanoseconds
+    timeout-ns: option<u64>,
 
+    /// How and whether to retry the operation
+    retry-strategy: option<retry-strategy>,
+
+    /// A known span to associate this lookup with
+    parent-span: option<request-span>,
+  }
+
+  /// Options for retrieving a document from all replicas
+  record document-get-all-replica-options {
+    /// Timeout that should be used, in nanoseconds
+    timeout-ns: option<u64>,
+
+    /// How and whether to retry the operation
+    retry-strategy: option<retry-strategy>,
+
+    /// A known span to associate this lookup with
+    parent-span: option<request-span>,
+  }
 
   /// Result of a successfully executed document get
   record document-get-result {
@@ -552,6 +583,58 @@ interface document {
     id: document-id,
     options: option<document-get-options>,
   ) -> result<document-get-result, document-error>;
+
+  /// Result from a replica-aware document get
+  record document-get-replica-result {
+    /// Whether this document came from a replica rather than the active node.
+    is-replica: bool,
+
+    /// Document that was retrieved
+    document: document,
+
+    /// Common flags stored with the document, describing how `document` is
+    /// encoded. `0` if the cluster reported none.
+    %flags: document-flags,
+
+    /// CAS revision of the document
+    cas: u64,
+
+    /// When the document should expire (nanoseconds)
+    ///
+    /// Deprecated: use expires-at instead
+    expires-in-ns: option<u64>,
+
+    /// Time when the document expires
+    expires-at: option<time>,
+  }
+
+  /// Retrieve a document by ID from the active node or any replica, whichever
+  /// answers first.
+  ///
+  /// A replica may be stale: it holds what it has received so far, which can
+  /// lag the active copy. Use it to stay readable while the active node is
+  /// unavailable, not to read your own writes.
+  ///
+  /// `document-error.unretrievable` when no copy answers.
+  ///
+  /// Requires a transport that can address replicas. Implementations that
+  /// cannot return `document-error.unsupported`.
+  get-any-replicas: async func(
+    id: document-id,
+    options: option<document-get-any-replica-options>,
+  ) -> result<document-get-replica-result, document-error>;
+
+  /// Retrieve every available copy of a document, active and replica.
+  ///
+  /// The copies may disagree: each carries its own CAS, and `is-replica` says
+  /// which is the active one. Bounded by the bucket's replica count.
+  ///
+  /// Requires a transport that can address replicas. Implementations that
+  /// cannot return `document-error.unsupported`.
+  get-all-replicas: async func(
+    id: document-id,
+    options: option<document-get-all-replica-options>,
+  ) -> result<list<document-get-replica-result>, document-error>;
 
 
 
@@ -614,10 +697,9 @@ interface document {
 
   /// Retrieve and lock a document by ID
   ///
-  /// Pessimistic locking is a KV-protocol operation. An implementation that
-  /// reaches Couchbase over the Data API has no endpoint for this and reports
-  /// `unsupported` — use `get` plus a CAS-conditional `replace` there; one
-  /// speaking the binary protocol serves it.
+  /// The returned CAS is the lock's: only that value unlocks the document, and
+  /// only it writes through the lock. The lock lapses on its own, so a caller
+  /// that dies does not hold it forever.
   get-and-lock: async func(
     id: document-id,
     options: option<document-get-and-lock-options>,
