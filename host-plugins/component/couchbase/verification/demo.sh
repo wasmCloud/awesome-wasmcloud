@@ -5,7 +5,7 @@
 #
 #   - the `couchbase` plugin, over the Data API's HTTPS surface -- served here
 #     by Couchbase's Cloud Native Gateway, the same gateway that fronts Capella
-#   - the `couchbase-kv` plugin, over the binary KV protocol, with the official
+#   - the `couchbase-kv-sdk` plugin, over the binary KV protocol, with the official
 #     Couchbase Rust SDK compiled to wasm and driven through wasi:sockets
 #
 # The workload component is not rebuilt between the two runs. Only the host's
@@ -31,7 +31,7 @@ KEEP=0
 [[ "${1:-}" == "--keep" ]] && KEEP=1
 
 DATAAPI_WASM="$PLUGINS/couchbase/target/wasm32-wasip2/release/couchbase_plugin.wasm"
-KV_WASM="$PLUGINS/couchbase-kv/target/wasm32-wasip2/release/couchbase_kv_plugin.wasm"
+KV_WASM="$PLUGINS/couchbase-kv-sdk/target/wasm32-wasip2/release/couchbase_kv_sdk_plugin.wasm"
 CONFIG="$SCENARIO/.wash/config.yaml"
 OUT="$(mktemp -d)"
 DEVPID=""
@@ -122,7 +122,7 @@ build_plugin() {
   fi
 }
 build_plugin "$PLUGINS/couchbase" couchbase
-build_plugin "$PLUGINS/couchbase-kv" couchbase-kv
+build_plugin "$PLUGINS/couchbase-kv-sdk" couchbase-kv-sdk
 note "wasmcloud:couchbase and wasmcloud:host resolve from the checkout, not a registry"
 note "$(basename "$DATAAPI_WASM") $(du -h "$DATAAPI_WASM" | cut -f1)"
 note "$(basename "$KV_WASM") $(du -h "$KV_WASM" | cut -f1)  <- embeds the Couchbase Rust SDK"
@@ -225,10 +225,10 @@ if [[ "$KV_TRANSPORT" == "loopback" ]]; then
   # required: the *.wasmcloud.internal zone resolves inside the host, ahead of
   # the name allowlist, and the grant is checked at connect.
   note "addressing the cluster as host.wasmcloud.internal (needs wasmCloud#5577)"
-  run_scenario "KV" couchbase-kv "$KV_WASM" "couchbase://host.wasmcloud.internal" \
+  run_scenario "KV" couchbase-kv-sdk "$KV_WASM" "couchbase://host.wasmcloud.internal" \
     "      allowedHostLoopbackPorts: [\"11210\", \"8093\"]" "$OUT/kv.txt"
 else
-  run_scenario "KV" couchbase-kv "$KV_WASM" "couchbase://$HOSTADDR" \
+  run_scenario "KV" couchbase-kv-sdk "$KV_WASM" "couchbase://$HOSTADDR" \
     "      allowedHosts: [\"$HOSTADDR:11210\", \"$HOSTADDR:8093\"]
       allowedIpNameLookups: [\"*\"]" "$OUT/kv.txt"
 fi

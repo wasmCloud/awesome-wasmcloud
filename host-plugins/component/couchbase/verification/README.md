@@ -16,7 +16,7 @@ results are summarized in the project [README](../README.md#run-live).
   exercises the whole capability across the store boundary.
 
 The scenario drives **both** implementations — the Data API plugin here and the
-[KV plugin](../../couchbase-kv/) — because they export the same interface, and
+[KV plugin](../../couchbase-kv-sdk/) — because they export the same interface, and
 both score 34/34. Where the two transports genuinely differ it asserts on
 coherence rather than on one fixed answer: `get-and-lock`/`unlock` and
 `preserve-expiry` either report `unsupported`, or work *and* are checked for
@@ -134,7 +134,7 @@ Every line should read `OK`.
 the machine. `host.wasmcloud.internal` is the name for the machine's loopback.
 
 For the **KV plugin**, which uses raw `wasi:sockets`, that name is all it takes
-— see [its README](../../couchbase-kv/README.md#reaching-the-machines-loopback);
+— see [its README](../../couchbase-kv-sdk/README.md#reaching-the-machines-loopback);
 `allowedHostLoopbackPorts` on the plugin entry is enough.
 
 The **Data API plugin** cannot use it: `wasi:http` does not resolve the
@@ -150,7 +150,7 @@ it to `CNG_SAN` as `DNS:<name>`. The KV plugin resolves the name through
 `allowedIpNameLookups`:
 
 ```yaml
-    - id: couchbase-kv
+    - id: couchbase-kv-sdk
       allowedHosts: ["macbookpro.lan:11210", "macbookpro.lan:8093"]
       allowedIpNameLookups: ["*"]
 ```

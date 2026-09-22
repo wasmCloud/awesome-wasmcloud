@@ -1,4 +1,4 @@
-# Couchbase KV Component Host Plugin
+# Couchbase KV Component Host Plugin (Rust SDK)
 
 A second implementation of `wasmcloud:couchbase@0.2.0` — the *same* interface
 the sibling plugin exports, so a workload cannot tell which is serving it —
@@ -146,7 +146,7 @@ Measured from inside a plugin export with an awaited p3 connect:
 what lets this plugin talk to a cluster on the developer's own machine:
 
 ```yaml
-    - id: couchbase-kv
+    - id: couchbase-kv-sdk
       allowedHostLoopbackPorts: ["11210", "8093"]
 ```
 

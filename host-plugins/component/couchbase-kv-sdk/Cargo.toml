@@ -1,5 +1,5 @@
 [package]
-name = "couchbase-kv-plugin"
+name = "couchbase-kv-sdk-plugin"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
@@ -8,7 +8,7 @@ repository = "https://github.com/wasmCloud/awesome-wasmcloud"
 
 [lib]
 crate-type = ["cdylib"]
-name = "couchbase_kv_plugin"
+name = "couchbase_kv_sdk_plugin"
 
 [dependencies]
 wit-bindgen = { version = "0.60.0", features = ["async-spawn", "inter-task-wakeup"] }

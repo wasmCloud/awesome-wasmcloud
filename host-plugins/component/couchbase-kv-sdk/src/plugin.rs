@@ -37,7 +37,7 @@
 
 mod bindings {
     #![allow(unsafe_code)]
-    wit_bindgen::generate!({ world: "couchbase-kv-plugin", generate_all });
+    wit_bindgen::generate!({ world: "couchbase-kv-sdk-plugin", generate_all });
 }
 
 use std::cell::RefCell;
