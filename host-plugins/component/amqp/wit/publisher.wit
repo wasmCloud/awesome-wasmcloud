@@ -1,0 +1,19 @@
+package wasmcloud:amqp@0.1.0;
+
+/// The producing side: what a workload calls to put a message on the broker.
+interface publisher {
+  use types.{message, error};
+
+  /// Publish `message` to `exchange` with `routing-key`.
+  ///
+  /// The plugin publishes with publisher confirms, so this returns once the
+  /// broker has taken responsibility for the message. It does not mean a queue
+  /// received it: the plugin does not set the `mandatory` flag, so the broker
+  /// silently drops a message that no binding routes.
+  ///
+  /// Use the empty string for `exchange` to publish to the default exchange,
+  /// which routes by queue name: `routing-key` is then the queue's name.
+  ///
+  /// The exchange must already exist. The plugin does not declare exchanges.
+  publish: async func(exchange: string, routing-key: string, message: message) -> result<_, error>;
+}

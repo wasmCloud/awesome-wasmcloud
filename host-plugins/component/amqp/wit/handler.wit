@@ -1,0 +1,26 @@
+package wasmcloud:amqp@0.1.0;
+
+/// The consuming side: implemented by workloads that take messages from queues.
+interface handler {
+  use types.{delivery, outcome};
+  use wasmcloud:host/types@0.1.4.{call-error};
+
+  /// Called by the plugin for each message the broker delivers from one of the
+  /// workload's queues. The `queues` key of the workload's interface config
+  /// names them; see the README.
+  ///
+  /// The plugin consumes with manual acknowledgements. The `outcome` this
+  /// returns is what it sends the broker for the delivery: `ack`, `nack` or
+  /// `reject`.
+  ///
+  /// An `err` is a call that did not complete, so the plugin settles the
+  /// delivery itself: it requeues the message if the workload could not be
+  /// reached (`no-target`, `not-running`, `not-exported`), and rejects it
+  /// without requeueing for any other case, so a message that keeps failing
+  /// cannot loop. A queue with a dead-letter exchange keeps such messages.
+  ///
+  /// The plugin calls this concurrently, for up to the `prefetch` messages the
+  /// broker has outstanding. Messages are delivered in queue order, but they
+  /// finish in any order. Set `prefetch` to `1` to handle them one at a time.
+  handle-delivery: async func(delivery: delivery) -> result<outcome, call-error>;
+}

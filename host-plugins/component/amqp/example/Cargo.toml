@@ -1,0 +1,21 @@
+[package]
+name = "amqp-example"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "An example workload for the wasmCloud AMQP plugin: publishes over HTTP and handles what it receives."
+publish = false
+
+# Keeps this crate its own workspace, apart from the plugin's.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { version = "0.60", features = ["async-spawn", "inter-task-wakeup"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

@@ -1,0 +1,11 @@
+package wasmcloud:amqp-example@0.1.0;
+
+/// A workload that publishes messages when it receives an HTTP request, and
+/// handles the messages the broker delivers from its queue.
+world example {
+  /// `wasmcloud:amqp/publisher` to publish, and `wasmcloud:amqp/handler` to
+  /// receive.
+  include wasmcloud:amqp/handler-service@0.1.0;
+
+  export wasi:http/handler@0.3.0;
+}

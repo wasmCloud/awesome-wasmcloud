@@ -1,0 +1,35 @@
+version: 2.0.0
+
+build:
+  command: cargo build --release --target wasm32-wasip2
+  component_path: target/wasm32-wasip2/release/amqp_example.wasm
+
+dev:
+  plugins:
+    - id: amqp
+      # Built by `wash build` in the directory above.
+      file: ../target/wasm32-wasip2/release/amqp_plugin.wasm
+      # Where the broker is, and who the plugin connects as. Only the operator
+      # can set these: a workload's own config never reaches them.
+      config:
+        host: host.wasmcloud.internal
+        port: "5672"
+        username: wasmcloud
+        password: wasmcloud
+      # `host.wasmcloud.internal` is the machine `wash dev` runs on, so this
+      # reaches RabbitMQ on the port Docker publishes. The plugin may use only
+      # the ports it lists here.
+      allowedHostLoopbackPorts: [5672]
+
+  # What this workload asks of the plugin: the interfaces, and the queue it
+  # consumes.
+  host_interfaces:
+    - namespace: wasmcloud
+      package: amqp
+      interfaces: [publisher, handler]
+      version: 0.1.0
+      config:
+        queues: wasmcloud-example
+        # Create the queue if it is missing. Fine for trying this out; in
+        # production, create queues with your usual tooling instead.
+        declare-queues: "true"

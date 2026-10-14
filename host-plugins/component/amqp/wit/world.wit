@@ -1,0 +1,51 @@
+package wasmcloud:amqp@0.1.0;
+
+/// For workloads that only publish messages.
+world imports {
+  import types;
+  import publisher;
+}
+
+/// For workloads that consume queues. The plugin delivers each message to the
+/// exported `handler`. The workload may also publish, for example to answer on
+/// a message's `reply-to`.
+world handler-service {
+  import types;
+  import publisher;
+
+  export handler;
+}
+
+/// The host component plugin itself: what the `amqp` plugin in this repository
+/// implements. Workloads do not use this world.
+///
+/// It exports `publisher` for workloads to call, and imports `handler`, which
+/// no host built-in provides, so the host routes each call to the export of a
+/// workload bound to this plugin.
+world plugin {
+  /// Names the workload making a call, so the plugin can keep each workload's
+  /// publisher channel and consumers apart.
+  import wasmcloud:host/identity@0.1.4;
+  /// Names which workload a call on `handler` goes to, and lists the workloads
+  /// that can be called.
+  import wasmcloud:host/workload-call@0.1.4;
+  /// The broker address and credentials, from the plugin's own host
+  /// configuration.
+  import wasi:config/store@0.2.0-rc.1;
+  /// Paces the background loop; see `src/lib.rs`.
+  import wasi:clocks/monotonic-clock@0.3.0;
+  /// Where the plugin writes its log, which is the host's own log.
+  import wasi:logging/logging@0.1.0-draft;
+
+  import handler;
+  export publisher;
+  /// `handler` and `publisher` share these types, which the plugin therefore
+  /// both imports and exports. Exporting them is what tells the host the
+  /// plugin serves them itself, so no workload is asked to.
+  export types;
+
+  /// Tells the plugin which queues each workload wants, as it is deployed.
+  export wasmcloud:host/workload-lifecycle@0.1.4;
+  /// The background task that owns the broker connection.
+  export wasi:cli/run@0.3.0;
+}

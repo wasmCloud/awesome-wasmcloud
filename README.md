@@ -44,7 +44,7 @@ _Nothing here yet. [Add the first one](CONTRIBUTING.md)._
 
 Capabilities built as [WebAssembly components](https://wasmcloud.com/docs/runtime/creating-host-component-plugins) and deployed into a host at runtime as trigger services with a capability ingress, so you ship, version, and sandbox them like any other component. Currently opt-in via the `host-component-plugins` feature, so check the docs for the state of play before depending on one. Hosted projects live in [`host-plugins/component/`](host-plugins/component/).
 
-_Nothing here yet. [Add the first one](CONTRIBUTING.md)._
+- [amqp](host-plugins/component/amqp/) (hosted): AMQP 0-9-1 client for RabbitMQ in Rust on amqprs, with a `wasmcloud:amqp` WIT interface for publishing to exchanges and consuming queues, carrying message properties, headers, and ack, nack, and reject. Reconnects after a broker restart, speaks plain AMQP only (no AMQPS yet), and includes an example workload.
 
 ## Workload Examples
 

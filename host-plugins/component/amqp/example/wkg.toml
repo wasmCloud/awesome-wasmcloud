@@ -1,0 +1,3 @@
+[overrides]
+# The interface package lives next to the plugin that implements it.
+"wasmcloud:amqp" = { path = "../wit" }

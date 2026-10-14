@@ -1,0 +1,28 @@
+[package]
+name = "amqp-plugin"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "A wasmCloud host component plugin that gives workloads an AMQP 0-9-1 client, for RabbitMQ and other compatible brokers."
+publish = false
+
+# Keeps this crate its own workspace, so building it never depends on a
+# Cargo.toml further up the tree, and the example workload can stay separate.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+amqprs = { version = "2.1.5", default-features = false }
+async-trait = "0.1"
+# `tokio_unstable` (see .cargo/config.toml) is what makes `net` available on
+# WASI. `rt-multi-thread` is enabled by amqprs but never used: WASI has no
+# threads, so the plugin only runs a current-thread runtime.
+tokio = { version = "1.53", default-features = false, features = ["rt", "net", "time", "macros", "sync"] }
+wit-bindgen = { version = "0.60", features = ["async-spawn", "inter-task-wakeup"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

@@ -1,0 +1,112 @@
+package wasmcloud:amqp@0.1.0;
+
+/// Types shared by the `publisher` and `handler` interfaces.
+///
+/// The shapes follow AMQP 0-9-1's `basic` class, so what a RabbitMQ user knows
+/// about exchanges, routing keys, message properties and acknowledgements
+/// carries over directly.
+interface types {
+  /// A value in a message's `headers` table.
+  ///
+  /// AMQP field tables carry more shapes than these (decimals, nested tables
+  /// and arrays, integers of several widths). The cases below cover what
+  /// applications use. On a delivery, a header of any other shape is left out,
+  /// and so is an unsigned 64-bit integer above `s64::MAX`.
+  variant header-value {
+    boolean(bool),
+    /// Any AMQP integer type, widened to 64 bits.
+    integer(s64),
+    /// Either AMQP floating-point type, widened to 64 bits.
+    float(f64),
+    text(string),
+    bytes(list<u8>),
+    /// Seconds since the Unix epoch, AMQP's `timestamp` type.
+    timestamp(u64),
+  }
+
+  /// Whether the broker may lose a message if it restarts. It only keeps a
+  /// persistent message if the queue is durable too.
+  enum delivery-mode {
+    transient,
+    persistent,
+  }
+
+  /// The `basic` properties of a message. Every property is optional, and the
+  /// plugin passes each one through to the broker unchanged.
+  record properties {
+    content-type: option<string>,
+    content-encoding: option<string>,
+    /// Application-defined headers. RabbitMQ's header exchanges route on them.
+    headers: list<tuple<string, header-value>>,
+    delivery-mode: option<delivery-mode>,
+    /// Priority from 0 to 9 in classic queues that enable priorities.
+    priority: option<u8>,
+    correlation-id: option<string>,
+    reply-to: option<string>,
+    /// Per-message TTL in milliseconds, written as a decimal string, which is
+    /// how AMQP carries it.
+    expiration: option<string>,
+    message-id: option<string>,
+    /// Seconds since the Unix epoch.
+    timestamp: option<u64>,
+    /// The AMQP `type` property.
+    message-type: option<string>,
+    /// The broker only accepts a value equal to the name of the user the
+    /// plugin connects as, so a workload cannot claim another identity.
+    user-id: option<string>,
+    app-id: option<string>,
+  }
+
+  /// A message: its properties and its payload.
+  record message {
+    properties: properties,
+    body: list<u8>,
+  }
+
+  /// A message the broker delivered from a queue.
+  record delivery {
+    /// The queue the message was consumed from.
+    queue: string,
+    /// The exchange the message was published to. Empty for the default
+    /// exchange.
+    exchange: string,
+    routing-key: string,
+    /// Whether the broker had delivered this message before, and it came back
+    /// because it was nacked, rejected with requeue, or its consumer went away.
+    redelivered: bool,
+    message: message,
+  }
+
+  /// What the handler decides for a delivery. The plugin sends it to the
+  /// broker as the delivery's one settlement.
+  ///
+  /// Until a delivery is settled the broker holds it, and if the consumer goes
+  /// away first the broker puts it back on the queue.
+  variant outcome {
+    /// `basic.ack`: the message was handled, and the broker may delete it.
+    ack,
+    /// `basic.nack`: the message was not handled. The payload is `requeue`:
+    /// `true` puts the message back on the queue, `false` discards it, or
+    /// dead-letters it if the queue has a dead-letter exchange.
+    nack(bool),
+    /// `basic.reject`: the message can never be handled. The payload is
+    /// `requeue`, as for `nack`. On a single message the two behave the same;
+    /// the names say what the handler means.
+    reject(bool),
+  }
+
+  /// Why `publish` failed.
+  variant error {
+    /// The plugin has no connection to the broker, because it is still
+    /// connecting or reconnecting. The call may succeed if retried later.
+    unavailable(string),
+    /// The broker did not take the message: it nacked it, or it closed the
+    /// channel, as it does for a publish to an exchange that does not exist.
+    rejected(string),
+    /// An argument is one AMQP cannot carry, such as an exchange name longer
+    /// than 255 bytes.
+    invalid(string),
+    /// Anything else, with detail meant for a log.
+    other(string),
+  }
+}
