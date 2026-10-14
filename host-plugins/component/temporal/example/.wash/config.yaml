@@ -1,0 +1,33 @@
+version: 2.0.0
+
+build:
+  command: cargo build --release --target wasm32-wasip2
+  component_path: target/wasm32-wasip2/release/temporal_example.wasm
+
+dev:
+  plugins:
+    - id: temporal
+      # Built by `wash build` in the directory above.
+      file: ../target/wasm32-wasip2/release/temporal_plugin.wasm
+      # Where Temporal is, and what to poll. Only the operator can set these: a
+      # workload's own config never reaches them.
+      config:
+        # A `temporal server start-dev` on this machine. The plugin's outgoing
+        # HTTP is made by the host, so `127.0.0.1` here is the host's own
+        # loopback (checked with wash 2.10.3; with wash in Docker, run it with
+        # `--network host`). For a server elsewhere, put its address here.
+        address: &temporal http://127.0.0.1:7233
+        namespace: default
+        task-queues: wasmcloud-example
+      # The plugin may reach only the hosts it lists here. This is the same
+      # address as above, through the YAML anchor, so there is one to change.
+      allowedHosts:
+        - *temporal
+
+  # What this workload asks of the plugin: it runs activities, and sends
+  # heartbeats. It sets no keys: the task queues are the operator's choice.
+  host_interfaces:
+    - namespace: wasmcloud
+      package: temporal
+      interfaces: [activity, context]
+      version: 0.1.0

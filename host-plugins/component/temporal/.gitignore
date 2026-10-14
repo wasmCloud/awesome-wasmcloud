@@ -1,0 +1,11 @@
+# The repository's root .gitignore ignores `.wash/`, but this project's build
+# configuration is `.wash/config.yaml`, and `wash build` needs it. A
+# .gitignore in a subdirectory overrides the root one.
+!.wash/
+
+# WIT packages `wash build` fetches. wkg.lock records which ones.
+/wit/deps/
+/example/wit/deps/
+
+# The example workflow's Python virtual environment.
+/example/workflow/.venv/

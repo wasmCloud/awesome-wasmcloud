@@ -1,0 +1,11 @@
+package wasmcloud:temporal-example@0.1.0;
+
+/// A workload that runs Temporal activities.
+world example {
+  /// Exports `wasmcloud:temporal/activity`, and imports
+  /// `wasmcloud:temporal/context` for heartbeats.
+  include wasmcloud:temporal/activity-worker@0.1.0;
+
+  /// For `slow`, to wait between heartbeats without blocking the host.
+  import wasi:clocks/monotonic-clock@0.3.0;
+}

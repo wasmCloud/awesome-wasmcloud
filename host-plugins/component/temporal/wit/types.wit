@@ -1,0 +1,92 @@
+/// The values that `activity` and `context` share.
+interface types {
+  /// One Temporal payload: an encoded value plus the metadata that says how it
+  /// is encoded. The `encoding` metadata entry names the format, for example
+  /// `json/plain`. The plugin passes payloads through without decoding them.
+  record payload {
+    metadata: list<tuple<string, list<u8>>>,
+    data: list<u8>,
+  }
+
+  /// What Temporal says about the activity a workload is asked to run.
+  record activity-info {
+    /// The activity's name, as the workflow called it, for example `greet`.
+    activity-type: string,
+    activity-id: string,
+    workflow-id: string,
+    workflow-run-id: string,
+    workflow-type: string,
+    namespace: string,
+    task-queue: string,
+    /// Starts at 1 and goes up by one on each retry.
+    attempt: u32,
+    /// Identifies this attempt to Temporal. Pass it to `context.heartbeat`.
+    task-token: list<u8>,
+    /// The details of the last heartbeat of an earlier attempt, so a retried
+    /// activity can resume where that attempt left off. Empty on a first
+    /// attempt, or when no heartbeat carried details.
+    heartbeat-details: list<payload>,
+  }
+
+  /// How an activity failed.
+  record failure {
+    /// A message for the workflow and Temporal's UI.
+    message: string,
+    /// An application-defined type name, which a workflow's retry policy can
+    /// list as non-retryable. May be empty.
+    error-type: string,
+    /// True stops Temporal retrying the activity, whatever the retry policy.
+    non-retryable: bool,
+    details: list<payload>,
+  }
+
+  /// Why `activity.execute` returned no result.
+  variant execute-error {
+    /// The activity ran and failed. The plugin reports it to Temporal as the
+    /// workload describes it.
+    failed(failure),
+    /// The workload was cancelled: it learned so from `context.heartbeat` and
+    /// stopped. The plugin reports the cancellation to Temporal.
+    cancelled,
+    /// Set by the host, not by a workload: the host could not complete the
+    /// call, and the detail says why. The plugin reports it to Temporal as a
+    /// retryable failure.
+    host(option<string>),
+  }
+
+  /// Why a heartbeat did not reach Temporal.
+  variant heartbeat-error {
+    /// Temporal no longer knows this task token: the attempt timed out, or it
+    /// already completed. The workload should stop.
+    not-found,
+    /// The plugin could not reach Temporal. Heartbeats are best effort, so the
+    /// workload may carry on and try again later.
+    unavailable(string),
+    /// Any other failure, with a message for a log.
+    other(string),
+  }
+}
+
+/// Exported by a workload to run activities.
+interface activity {
+  use types.{activity-info, payload, execute-error};
+
+  /// Runs one activity attempt, and returns its result payloads.
+  ///
+  /// A workload that does not implement `info.activity-type` should return a
+  /// non-retryable `failed`.
+  execute: async func(info: activity-info, input: list<payload>) -> result<list<payload>, execute-error>;
+}
+
+/// Served by the plugin, for workloads in the middle of an activity.
+interface context {
+  use types.{payload, heartbeat-error};
+
+  /// Records a heartbeat for the attempt with `task-token`, and returns true
+  /// when Temporal has asked to cancel the activity. A cancelled workload
+  /// should stop and return `execute-error.cancelled`.
+  ///
+  /// `details` are kept by Temporal and handed to the next attempt in
+  /// `activity-info.heartbeat-details`.
+  heartbeat: async func(task-token: list<u8>, details: list<payload>) -> result<bool, heartbeat-error>;
+}

@@ -1,0 +1,41 @@
+package wasmcloud:temporal@0.1.0;
+
+/// For workloads that run activities. The plugin calls the exported `activity`
+/// for each task it takes from Temporal.
+world activity-worker {
+  import types;
+  import context;
+
+  export activity;
+}
+
+/// The host component plugin itself: what the `temporal` plugin in this
+/// repository implements. Workloads do not use this world.
+///
+/// It exports `context` for workloads to call, and imports `activity`, which no
+/// host built-in provides, so the host routes each call to the export of a
+/// workload bound to this plugin.
+world plugin {
+  /// Lists the workloads that export `activity`, and opens a call to one.
+  import wasmcloud:host/workload-call@0.1.4;
+  /// The server address, namespace, task queues and credentials, from the
+  /// plugin's own host configuration.
+  import wasi:config/store@0.2.0-rc.1;
+  /// Paces retries when Temporal cannot be reached.
+  import wasi:clocks/monotonic-clock@0.3.0;
+  /// Where the plugin writes its log, which is the host's own log.
+  import wasi:logging/logging@0.1.0-draft;
+  /// Carries the gRPC calls to Temporal. The host makes the TLS connection for
+  /// an `https` address.
+  import wasi:http/client@0.3.0;
+
+  import activity;
+  export context;
+  /// `activity` and `context` share these types, which the plugin therefore
+  /// both imports and exports. Exporting them is what tells the host the
+  /// plugin serves them itself, so no workload is asked to.
+  export types;
+
+  /// The background task that polls Temporal.
+  export wasi:cli/run@0.3.0;
+}

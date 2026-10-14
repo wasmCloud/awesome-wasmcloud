@@ -44,7 +44,7 @@ _Nothing here yet. [Add the first one](CONTRIBUTING.md)._
 
 Capabilities built as [WebAssembly components](https://wasmcloud.com/docs/runtime/creating-host-component-plugins) and deployed into a host at runtime as trigger services with a capability ingress, so you ship, version, and sandbox them like any other component. Currently opt-in via the `host-component-plugins` feature, so check the docs for the state of play before depending on one. Hosted projects live in [`host-plugins/component/`](host-plugins/component/).
 
-_Nothing here yet. [Add the first one](CONTRIBUTING.md)._
+- [temporal](host-plugins/component/temporal/) (hosted): Turns wasmCloud workloads into Temporal activity workers: workloads export the `wasmcloud:temporal/activity` WIT interface, and workflows written with any Temporal SDK call them. Written in Rust, it long-polls Temporal's gRPC API with a tonic client over a `wasi:http` transport, and includes a Rust example workload with a Python workflow.
 
 ## Workload Examples
 

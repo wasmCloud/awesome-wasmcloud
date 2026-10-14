@@ -1,0 +1,36 @@
+[package]
+name = "temporal-plugin"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "A wasmCloud host component plugin that runs Temporal activities in wasmCloud workloads."
+publish = false
+
+# Keeps this crate its own workspace, so building it never depends on a
+# Cargo.toml further up the tree, and the example workload can stay separate.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+bytes = "1"
+http = "1"
+http-body-util = "0.1.3"
+# The message types, and the descriptor set build.rs generates the client from.
+# `vendored-protox` compiles the protos without `protoc`. Its `grpc-clients`
+# feature stays off: it turns on tonic's `channel`, which does not build on WASI.
+temporalio-protos = { version = "0.10", features = ["vendored-protox"] }
+tonic = { version = "0.14", default-features = false, features = ["codegen"] }
+tonic-prost = "0.14"
+tower-service = "0.3"
+wit-bindgen = { version = "0.60", features = ["async-spawn", "inter-task-wakeup"] }
+
+[build-dependencies]
+prost = "0.14"
+tonic-prost-build = "0.14"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
