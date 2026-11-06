@@ -118,10 +118,14 @@ impl Connection {
 
         let selected = conn.call(op::SELECT_BUCKET, 0, bucket.as_bytes(), &[], &[], 0).await?;
         if !selected.ok() {
-            return Err(format!(
-                "could not select bucket `{bucket}`: status 0x{:04x}",
-                selected.header.status
-            ));
+            return Err(match selected.header.status {
+                // The server answers the same for a bucket that does not exist,
+                // so as not to reveal which buckets do.
+                status::ACCESS_DENIED | status::NOT_FOUND => format!(
+                    "bucket `{bucket}` does not exist, or user `{username}` has no role on it"
+                ),
+                other => format!("could not select bucket `{bucket}`: status 0x{other:04x}"),
+            });
         }
 
         // Routing needs the vbucket count, which only the cluster config has.

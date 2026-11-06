@@ -1,0 +1,26 @@
+package wasmcloud:host@0.1.6;
+
+/// Provided by the host to a component plugin so it can partition state by the
+/// workload currently calling it. The host answers based on the in-flight
+/// capability call, resolved from the caller's own guest task, so it is exact
+/// under concurrency no matter when in the call the plugin reads it.
+interface identity {
+    use types.{workload-id, component-id};
+
+    /// The workload id of the caller currently invoking this plugin.
+    get-workload-id: func() -> workload-id;
+    /// The component id of the caller currently invoking this plugin.
+    get-component-id: func() -> component-id;
+
+    /// The binding this call arrived on: the `(implements <name>)` label the
+    /// caller imported this plugin's interface under, or `none` for a plain,
+    /// unlabeled import. The label is the name an operator declares under a
+    /// `host.plugins` entry's `bindings`, and the name the matching
+    /// `workload-lifecycle.interface-binding` carried at bind time, so it
+    /// pairs a call with that binding's configuration.
+    ///
+    /// A label equal to the plugin's own id addresses the plugin rather than
+    /// one of its bindings and reads as `none`. A lifecycle hook reads `none`
+    /// too: it is about a whole workload, so read `workload-info` there.
+    get-binding-name: func() -> option<string>;
+}

@@ -9,7 +9,10 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::future::{poll_fn, Future};
+use std::pin::pin;
 use std::sync::{Mutex, PoisonError};
+use std::task::Poll;
 
 use crate::bindings;
 use crate::conn::Connection;
@@ -29,12 +32,21 @@ use bindings::exports::wasmcloud::couchbase::sqlpp_types::SqlppQueryError;
 use bindings::exports::wasmcloud::couchbase::types::{
     DocumentError, MutationMetadata, ReplicaReadLevel, Time,
 };
-use bindings::exports::wasmcloud::host::workload_lifecycle::{Guest as LifecycleGuest, WorkloadInfo};
+use bindings::exports::wasmcloud::host::workload_lifecycle::{
+    Guest as LifecycleGuest, InterfaceBinding, WorkloadInfo,
+};
+use bindings::wasi::clocks::monotonic_clock;
 use bindings::wasi::sockets::ip_name_lookup;
-use bindings::wasmcloud::host::identity;
+use bindings::wasmcloud::host::{binding_secrets, identity};
+use bindings::wasmcloud::secrets::reveal::reveal;
+use bindings::wasmcloud::secrets::store::SecretValue;
 
-/// Each workload's validated binding, keyed by workload id.
-static BINDINGS: Mutex<BTreeMap<String, Binding>> = Mutex::new(BTreeMap::new());
+/// Where a call lands: the workload, and the `(implements ..)` label it imported
+/// the capability under, if any.
+type BindingKey = (String, Option<String>);
+
+/// Each workload's validated bindings.
+static BINDINGS: Mutex<BTreeMap<BindingKey, Binding>> = Mutex::new(BTreeMap::new());
 
 thread_local! {
     /// Live connections, keyed by [`Binding::connection_key`]. A connection is
@@ -60,39 +72,80 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl LifecycleGuest for Component {
     async fn on_workload_bind(workload: WorkloadInfo) -> Result<(), String> {
-        let Some(iface) = workload
-            .interfaces
-            .iter()
-            .find(|i| i.namespace == "wasmcloud" && i.package == "couchbase")
-        else {
-            return Ok(());
-        };
+        let bound = bind(&workload).await;
+        // The host withholds a rejection's text from the workload's status when
+        // the bind carried secrets, since it cannot know what the text quotes.
+        // These name a host, a bucket and a user, never a value, so they go to
+        // the log, or a bad credential from etcd would fail with no reason at all.
+        if let Err(reason) = &bound {
+            eprintln!("couchbase plugin: refused a bind: {reason}");
+        }
+        bound
+    }
 
-        let binding = Binding::from_config(&iface.config).map_err(|reason| {
-            format!(
-                "workload `{}` in namespace `{}`: wasmcloud:couchbase {reason}",
-                workload.name, workload.namespace
-            )
-        })?;
+    async fn on_workload_unbind(id: String) {
+        lock(&BINDINGS).retain(|(workload, _), _| *workload != id);
+        // The connection stays cached: another workload may share it, and the
+        // handshake is expensive. It goes when the plugin's store restarts.
+    }
+}
 
-        // Connect during bind so a bad endpoint or credential fails the deploy
-        // with a message, rather than the workload's first call.
-        connect(&binding).await.map_err(|e| {
+/// Validate a workload's bindings and connect them, so a bad endpoint or
+/// credential fails the deploy rather than the workload's first call.
+async fn bind(workload: &WorkloadInfo) -> Result<(), String> {
+    let refuse = |reason: String| {
+        format!(
+            "workload `{}` in namespace `{}`: wasmcloud:couchbase {reason}",
+            workload.name, workload.namespace
+        )
+    };
+
+    let mut bound = Vec::new();
+    for iface in workload
+        .interfaces
+        .iter()
+        .filter(|i| i.namespace == "wasmcloud" && i.package == "couchbase")
+    {
+        let mut config = iface.config.clone();
+        config.extend(binding_config_secrets(iface).await.map_err(refuse)?);
+        let binding = Binding::from_config(&config).map_err(refuse)?;
+        bound.push((iface.name.clone(), binding));
+    }
+
+    for (_, binding) in &bound {
+        let reached = within(binding.timeout_ms, connect(binding))
+            .await
+            .unwrap_or_else(|| Err(format!("no answer within {}ms", binding.timeout_ms)));
+        reached.map_err(|e| {
             format!(
                 "workload `{}`: could not reach Couchbase at `{}:{}`: {e}",
                 workload.name, binding.host, binding.port
             )
         })?;
-
-        lock(&BINDINGS).insert(workload.id, binding);
-        Ok(())
     }
 
-    async fn on_workload_unbind(id: String) {
-        lock(&BINDINGS).remove(&id);
-        // The connection stays cached: another workload may share it, and the
-        // handshake is expensive. It goes when the plugin's store restarts.
+    let mut bindings = lock(&BINDINGS);
+    for (name, binding) in bound {
+        bindings.insert((workload.id.clone(), name), binding);
     }
+    Ok(())
+}
+
+/// The keys of this binding filled from a plugin-backed secret, which reach the
+/// plugin as handles rather than as config. Only answers during a bind.
+async fn binding_config_secrets(iface: &InterfaceBinding) -> Result<Vec<(String, String)>, String> {
+    let secrets = binding_secrets::get(&iface.namespace, &iface.package, iface.name.as_deref())
+        .map_err(|e| format!("could not read this binding's secrets: {e}"))?;
+    let mut revealed = Vec::with_capacity(secrets.len());
+    for (key, secret) in secrets {
+        match reveal(&secret).await {
+            SecretValue::String(value) => revealed.push((key, value)),
+            SecretValue::Bytes(_) => {
+                return Err(format!("secret `{key}` is binary, and config values are text"))
+            }
+        }
+    }
+    Ok(revealed)
 }
 
 fn caller_binding() -> Result<Binding, DocumentError> {
@@ -102,11 +155,35 @@ fn caller_binding() -> Result<Binding, DocumentError> {
             "no in-flight caller: wasmcloud:couchbase can only be used from a workload's capability call".to_string(),
         ));
     }
-    lock(&BINDINGS).get(&workload).cloned().ok_or_else(|| {
+    let key = (workload.clone(), identity::get_binding_name());
+    lock(&BINDINGS).get(&key).cloned().ok_or_else(|| {
         DocumentError::NotConfigured(format!(
             "workload `{workload}` has no wasmcloud:couchbase binding on this plugin"
         ))
     })
+}
+
+/// Run `operation` under a deadline, or give up on it and return `None`.
+///
+/// The KV protocol has no timeouts of its own, and a cluster that stops
+/// answering without closing the socket (a partition, a frozen node) would
+/// otherwise hold the caller forever. Giving up drops `operation`, which cancels
+/// whatever it was waiting on.
+async fn within<F: Future>(timeout_ms: u32, operation: F) -> Option<F::Output> {
+    let timeout_ns = u64::from(timeout_ms).saturating_mul(1_000_000);
+    let mut operation = pin!(operation);
+    let mut timer = pin!(monotonic_clock::wait_for(timeout_ns));
+    poll_fn(|cx| {
+        // The operation goes first, so one finishing on the deadline counts.
+        if let Poll::Ready(output) = operation.as_mut().poll(cx) {
+            return Poll::Ready(Some(output));
+        }
+        if timer.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 /// Resolve the binding's host and open a connection, unless one is cached.
@@ -138,12 +215,28 @@ async fn connect(binding: &Binding) -> Result<(), String> {
     Ok(())
 }
 
-/// Run one operation on this binding's connection.
+/// Run one operation on this binding's connection, within its time limit.
 ///
+/// The limit covers the whole call, including opening a connection when there
+/// is none. As everywhere else `document-error.timeout` means, the call is
+/// abandoned rather than undone: the server may still apply a write whose reply
+/// never arrived.
+async fn with_connection<F, T>(binding: &Binding, f: F) -> Result<T, DocumentError>
+where
+    F: AsyncFnOnce(&mut Connection) -> Result<T, DocumentError>,
+{
+    within(binding.timeout_ms, on_connection(binding, f))
+        .await
+        .unwrap_or(Err(DocumentError::Timeout))
+}
+
 /// The connection is taken out of the cache for the duration: a `RefCell`
 /// borrow cannot be held across an `await`, and two concurrent callers must not
 /// interleave frames on one socket.
-async fn with_connection<F, T>(binding: &Binding, f: F) -> Result<T, DocumentError>
+///
+/// A deadline dropping this future drops the connection with it, which is what
+/// it should do: its next reply would be the abandoned call's.
+async fn on_connection<F, T>(binding: &Binding, f: F) -> Result<T, DocumentError>
 where
     F: AsyncFnOnce(&mut Connection) -> Result<T, DocumentError>,
 {
@@ -178,7 +271,7 @@ fn to_document_error(code: u16, had_cas: bool) -> DocumentError {
         status::NOT_STORED => DocumentError::NotFound,
         status::LOCKED => DocumentError::Locked,
         status::NOT_LOCKED => DocumentError::NotLocked,
-        status::AUTH_ERROR => DocumentError::Unauthorized,
+        status::AUTH_ERROR | status::ACCESS_DENIED => DocumentError::Unauthorized,
         status::TOO_LARGE => {
             DocumentError::InvalidArgument("the document is larger than the cluster allows".to_string())
         }
@@ -266,8 +359,9 @@ async fn store(
     flags: Option<u32>,
     expires_in_ns: u64,
     cas: u64,
+    timeout_ns: Option<u64>,
 ) -> Result<MutationMetadata, DocumentError> {
-    let binding = caller_binding()?;
+    let binding = caller_binding()?.with_timeout_ns(timeout_ns);
     let extras =
         proto::store_extras(flags.unwrap_or(proto::JSON_FLAGS), expiry_seconds(expires_in_ns));
     let b = binding.clone();
@@ -336,8 +430,9 @@ async fn read(
     extras: Vec<u8>,
     paths: Vec<String>,
     with_expiry: bool,
+    timeout_ns: Option<u64>,
 ) -> Result<DocumentGetResult, DocumentError> {
-    let binding = caller_binding()?;
+    let binding = caller_binding()?.with_timeout_ns(timeout_ns);
     with_connection(&binding, async move |conn| {
         let vbucket = conn.vbucket_for(&id);
         let key = conn.wire_key(&id);
@@ -405,7 +500,7 @@ impl DocumentGuest for Component {
             reject_unhonoured(o.persist_to, o.replicate_to)?;
         }
         let (flags, expires) = options.as_ref().map_or((None, 0), |o| (o.flags, o.expires_in_ns));
-        store(op::ADD, id, document, flags, expires, 0).await
+        store(op::ADD, id, document, flags, expires, 0, options.and_then(|o| o.timeout_ns)).await
     }
 
     async fn upsert(
@@ -418,7 +513,7 @@ impl DocumentGuest for Component {
             reject_preserve_expiry(o.preserve_expiry)?;
         }
         let (flags, expires) = options.as_ref().map_or((None, 0), |o| (o.flags, o.expires_in_ns));
-        store(op::SET, id, document, flags, expires, 0).await
+        store(op::SET, id, document, flags, expires, 0, options.and_then(|o| o.timeout_ns)).await
     }
 
     async fn replace(
@@ -432,7 +527,7 @@ impl DocumentGuest for Component {
         }
         let (flags, expires, cas) =
             options.as_ref().map_or((None, 0, 0), |o| (o.flags, o.expires_in_ns, o.cas));
-        store(op::REPLACE, id, document, flags, expires, cas).await
+        store(op::REPLACE, id, document, flags, expires, cas, options.and_then(|o| o.timeout_ns)).await
     }
 
     async fn get(
@@ -446,14 +541,14 @@ impl DocumentGuest for Component {
             .map(|p| p.iter().filter(|p| !p.is_empty()).cloned().collect())
             .unwrap_or_default();
         let with_expiry = options.as_ref().is_some_and(|o| o.with_expiry);
-        read(op::GET, id, Vec::new(), paths, with_expiry).await
+        read(op::GET, id, Vec::new(), paths, with_expiry, options.and_then(|o| o.timeout_ns)).await
     }
 
     async fn remove(
         id: String,
         options: Option<DocumentRemoveOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
-        let binding = caller_binding()?;
+        let binding = caller_binding()?.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
         if let Some(o) = options.as_ref() {
             reject_unhonoured(o.persist_to, o.replicate_to)?;
         }
@@ -478,7 +573,7 @@ impl DocumentGuest for Component {
         id: String,
         options: Option<DocumentTouchOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
-        let binding = caller_binding()?;
+        let binding = caller_binding()?.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
         let seconds = expiry_seconds(options.as_ref().map_or(0, |o| o.expires_in));
         if seconds == 0 {
             return Err(DocumentError::InvalidArgument(
@@ -511,7 +606,8 @@ impl DocumentGuest for Component {
                 "get-and-touch requires a non-zero expires-in".to_string(),
             ));
         }
-        read(op::GET_AND_TOUCH, id, seconds.to_be_bytes().to_vec(), Vec::new(), false).await
+        let timeout_ns = options.and_then(|o| o.timeout_ns);
+        read(op::GET_AND_TOUCH, id, seconds.to_be_bytes().to_vec(), Vec::new(), false, timeout_ns).await
     }
 
     async fn get_and_lock(
@@ -523,14 +619,15 @@ impl DocumentGuest for Component {
             0 => DEFAULT_LOCK_SECONDS,
             ns => expiry_seconds(ns),
         };
-        read(op::GET_AND_LOCK, id, seconds.to_be_bytes().to_vec(), Vec::new(), false).await
+        let timeout_ns = options.and_then(|o| o.timeout_ns);
+        read(op::GET_AND_LOCK, id, seconds.to_be_bytes().to_vec(), Vec::new(), false, timeout_ns).await
     }
 
     async fn unlock(
         id: String,
         options: Option<DocumentUnlockOptions>,
     ) -> Result<(), DocumentError> {
-        let binding = caller_binding()?;
+        let binding = caller_binding()?.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
         let cas = options.as_ref().map_or(0, |o| o.cas);
         if cas == 0 {
             return Err(DocumentError::InvalidArgument(
@@ -655,6 +752,7 @@ impl SqlppGuest for Component {
             DocumentError::NotConfigured(m) => SqlppQueryError::NotConfigured(m),
             other => SqlppQueryError::Unexpected(format!("{other:?}")),
         })?;
+        let binding = binding.with_timeout_ns(options.as_ref().map(|o| o.timeout_ns));
 
         let mut args = Vec::with_capacity(params.len());
         for (index, param) in params.iter().enumerate() {

@@ -49,6 +49,9 @@ pub mod feature {
     /// Mutation tokens on every write, which `consistent-with` needs.
     pub const MUTATION_SEQNO: u16 = 0x0004;
     pub const XATTR: u16 = 0x0006;
+    /// Without this the server hangs up on an error it considers extended, such
+    /// as a refused privilege, instead of returning its status.
+    pub const XERROR: u16 = 0x0007;
     pub const SELECT_BUCKET: u16 = 0x0008;
     /// Datatype bit set on JSON values.
     pub const JSON: u16 = 0x000b;
@@ -68,6 +71,8 @@ pub mod status {
     pub const NOT_MY_VBUCKET: u16 = 0x0007;
     pub const LOCKED: u16 = 0x0009;
     pub const AUTH_ERROR: u16 = 0x0020;
+    /// Authenticated, but the user does not hold the privilege.
+    pub const ACCESS_DENIED: u16 = 0x0024;
     pub const NOT_LOCKED: u16 = 0x0030;
     pub const UNKNOWN_COLLECTION: u16 = 0x0088;
     pub const UNKNOWN_COMMAND: u16 = 0x0081;
@@ -200,6 +205,7 @@ pub fn hello_features() -> Vec<u8> {
     [
         feature::MUTATION_SEQNO,
         feature::XATTR,
+        feature::XERROR,
         feature::SELECT_BUCKET,
         feature::JSON,
         feature::COLLECTIONS,
@@ -425,6 +431,7 @@ mod tests {
         assert!(features.contains(&feature::COLLECTIONS));
         assert!(features.contains(&feature::MUTATION_SEQNO));
         assert!(features.contains(&feature::JSON));
+        assert!(features.contains(&feature::XERROR), "or a refused privilege drops the connection");
     }
 
     #[test]

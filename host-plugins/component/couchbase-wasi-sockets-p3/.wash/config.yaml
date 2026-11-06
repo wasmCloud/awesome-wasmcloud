@@ -5,7 +5,10 @@ wit:
     # The same interface definition the sibling plugins export, so the three
     # cannot drift.
     "wasmcloud:couchbase": ../couchbase/interface
-    "wasmcloud:host": ../couchbase/wit-deps/wasmcloud-host
+    # From wasmCloud v2.12.0. This plugin reads plugin-backed secrets through
+    # `binding-secrets`, so unlike its siblings it needs the 0.1.6 host WIT.
+    "wasmcloud:host": ./wit-deps/wasmcloud-host
+    "wasmcloud:secrets": ./wit-deps/wasmcloud-secrets
 
 build:
   command: cargo build --target wasm32-wasip2 --release

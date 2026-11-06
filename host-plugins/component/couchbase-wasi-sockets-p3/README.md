@@ -14,7 +14,13 @@ implementations cannot drift.
 
 **Status: working.** 34/34 on the
 [shared verification scenario](../couchbase/verification/), the same score as
-the other two, against a real cluster.
+the other two, against a real cluster. Also run as a host plugin on a wasmCloud
+2.12.0 cluster in Kubernetes.
+
+**Requires wasmCloud 2.12.0 or newer**, built with the `host-component-plugins`
+feature, such as `ghcr.io/wasmcloud/wash:2.12.0-all-features`. This plugin
+imports `wasmcloud:host@0.1.6` to read plugin-backed secrets, which older hosts
+do not provide.
 
 ## Why it exists
 
@@ -92,18 +98,49 @@ than a wrong answer.
 |---|---|---|---|
 | `endpoint` | yes | — | `couchbase://host[:port]`, port defaulting to `11210` |
 | `bucket` | yes | — | The one bucket this binding may reach |
-| `username` / `password` | yes | — | Cluster credential. Source the password from `secretFrom` |
+| `username` / `password` | yes | — | Cluster credential. Source them from `secretFrom` |
 | `scope` / `collection` | no | `_default` | Keyspace this binding operates in |
 | `query-port` | no | `8093` | Query service port, for SQL++ |
-| `timeout-ms` | no | `30000` | Server-side limit for a SQL++ query |
+| `timeout-ms` | no | `30000` | Time limit on a call, document or SQL++, overridden by the call's own `timeout-ns`. Also bounds the connection attempt at bind |
 
 SQL++ is an HTTP service, so it goes out over `wasi:http` to `query-port` rather
-than over the KV socket. `allowedHosts` needs both ports, and
-`allowedIpNameLookups` needs to cover the host unless `endpoint` is an address.
+than over the KV socket. `allowedHosts` needs both ports. A host named there may
+also be resolved, so `allowedIpNameLookups` is only for names it does not list.
+
+### Who sets it
+
+On a `host.plugins` entry, or a host group's `plugins` in the chart, the operator
+owns the binding and the workload's manifest names none of it:
+
+```yaml
+- id: couchbase
+  image: registry.example.com/couchbase-wasi-sockets-p3:0.1.0
+  config:
+    endpoint: couchbase://couchbase.example.com
+    bucket: orders
+  secretFrom: [couchbase-credentials]   # a Secret with `username` and `password`
+  hostOwnedKeys: [endpoint, bucket, username, password, scope, collection, query-port]
+  allowedHosts:
+    - couchbase.example.com:11210
+    - couchbase.example.com:8093
+```
+
+**List every key in `hostOwnedKeys`, including the ones `config` sets.** This
+plugin claims no keys in code, so on 2.12.0 a key that is only in `config` can be
+overridden from the workload's manifest, which would point the operator's
+credential at a bucket of the workload's choosing.
+
+A plugin-backed secret (`pluginSecrets`, served by another host plugin) cannot
+fill the entry itself, only its named `bindings`. The workload then imports the
+capability by `(implements ..)` label, and each label is a binding with its own
+cluster and keyspace. When a bind carrying such a secret is refused, the host
+withholds the reason from the workload's status, so the plugin writes it to
+stderr, which reaches the host's log.
+
 
 ## Building
 
-Tested with `wash` 2.9.0 and Rust 1.94, targeting `wasm32-wasip2`.
+Tested with `wash` 2.10.3 and Rust 1.97, targeting `wasm32-wasip2`.
 
 ```console
 wash build
