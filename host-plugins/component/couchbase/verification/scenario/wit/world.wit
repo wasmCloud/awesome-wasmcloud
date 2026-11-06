@@ -1,0 +1,8 @@
+package example:cbtest@0.1.0;
+world cb-test {
+    import wasmcloud:couchbase/types@0.2.0;
+    import wasmcloud:couchbase/sqlpp-types@0.2.0;
+    import wasmcloud:couchbase/document@0.2.0;
+    import wasmcloud:couchbase/sqlpp@0.2.0;
+    export wasi:http/handler@0.3.0;
+}

@@ -1,0 +1,43 @@
+package wasmcloud:couchbase-kv-sdk-plugin@0.1.0;
+
+/// The Couchbase component host plugin that speaks the binary KV protocol.
+///
+/// Same capability as the sibling `couchbase` plugin — it exports the identical
+/// `wasmcloud:couchbase@0.2.0` interface, and a workload cannot tell which of
+/// the two is serving it. The difference is underneath: this one embeds the
+/// Couchbase Rust SDK and connects over `couchbases://` through
+/// `wasi:sockets` + `wasi:tls`, rather than over the Capella Data API's HTTPS
+/// surface.
+///
+/// That buys the operations the Data API has no endpoint for — pessimistic
+/// locking and replica reads — and works against self-hosted Couchbase, which
+/// has no Data API at all.
+world couchbase-kv-sdk-plugin {
+    /// The SDK opens its own TCP connections. TLS is terminated *inside* the
+    /// component by the SDK's own rustls, not by the host — so this needs no
+    /// `wasi:tls` import, and a host serving this plugin does not need to be
+    /// built with the `wasi-tls` feature. Only `host-component-plugins`.
+    ///
+    /// DNS matters more here than for an HTTP plugin: a Capella connection
+    /// string resolves its nodes through `_couchbases._tcp.<host>` SRV records,
+    /// so the plugin's `allowedIpNameLookups` has to permit them.
+    /// Only p3 sockets are declared here. The p2 socket imports the built
+    /// component also carries come from the wasm32-wasip2 target itself (they
+    /// show up as `@0.2.12`), not from this world — and declaring `@0.2.0`
+    /// alongside p3 makes the two versions of the package unresolvable.
+    ///
+    /// p3 sockets: `connect`/`send`/`receive` are async futures and streams the
+    /// component-model runtime drives, so awaiting them yields to the same
+    /// executor that drives this plugin's exports. That is the whole point —
+    /// p2's blocking surface hangs inside an async export.
+
+    import wasmcloud:host/identity@0.1.1;
+    import wasmcloud:host/cancel@0.1.1;
+
+    export wasmcloud:host/workload-lifecycle@0.1.1;
+
+    export wasmcloud:couchbase/types@0.2.0;
+    export wasmcloud:couchbase/sqlpp-types@0.2.0;
+    export wasmcloud:couchbase/document@0.2.0;
+    export wasmcloud:couchbase/sqlpp@0.2.0;
+}

@@ -1,0 +1,4 @@
+# Tokio's socket support on wasm32 is gated behind this cfg. Setting it here
+# means a plain `cargo build --target wasm32-wasip2` works with no RUSTFLAGS.
+[target.wasm32-wasip2]
+rustflags = ["--cfg", "tokio_unstable"]

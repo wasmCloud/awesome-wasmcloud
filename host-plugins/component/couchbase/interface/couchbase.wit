@@ -1,0 +1,903 @@
+package wasmcloud:couchbase@0.2.0;
+
+/// The asynchronous successor to `wasmcloud:couchbase@0.1.0-draft`.
+///
+/// The published 0.1.0-draft package (see the `wasmcloud-provider-couchbase`
+/// provider) is entirely synchronous. A wasmCloud **component host plugin**
+/// serves its capability across a store boundary, and the cross-store shim
+/// registers and type-matches only asynchronous imports — so a synchronous
+/// interface cannot be served by one at all. This package is therefore the same
+/// API with `async func` throughout, exactly as `wasmcloud:secrets` was revised
+/// from `1.0.0` to `2.0.0` for the same reason.
+///
+/// Names, records, option fields and function signatures are kept identical to
+/// 0.1.0-draft wherever possible so porting is a matter of adding `.await`.
+/// Every intentional difference is called out in a `DIFFERS FROM 0.1.0-draft`
+/// note at the point it occurs.
+
+/// General types that can be used throughout the couchbase interface
+interface types {
+  /// ID of a Document
+  ///
+  /// Note that Document IDs are expected to be:
+  ///   - Assigned at the application level
+  ///   - Be valid UTF-8 at the application level
+  ///   - Be no longer than 250 bytes (not characters)
+  type document-id = string;
+
+  /// Path to a subdocument inside an existing document
+  type subdocument-path = string;
+
+  /// The span of a request, normally used when performing/enabling tracing
+  type request-span = string;
+
+  /// A string that is properly formatted JSON
+  type json-string = string;
+
+  /// Document field name (ex. to include in a search)
+  type document-field-name = string;
+
+  /// Collection name to include in a search
+  type collection-name = string;
+
+  /// Bucket name
+  type bucket-name = string;
+
+  /// Name of a search index
+  type search-index-name = string;
+
+  /// Whether an operation may read from a replica.
+  enum replica-read-level {
+    off,
+    on,
+  }
+
+  /// Direction in which to perform sorting
+  enum sort-direction {
+    asc,
+    desc,
+  }
+
+  /// Port of https://pkg.go.dev/time#Time
+  record time {
+    /// Offsets are assumed to be against the western hemisphere (GMT)
+    /// i.e. -14 -> 0 -> +14 UTC
+    offset: s8,
+    year: s32,
+    month: u8,
+    day: u8,
+    // 24hr time (i.e. 6PM is represented as `18`)
+    hour: u8,
+    minute: u8,
+    second: u8,
+    milliseconds: u32,
+    nanoseconds: u32,
+  }
+
+  /// A keyspace-path that identifies a collection
+  record collection {
+    /// Bucket the collection belongs to
+    bucket: bucket-name,
+    /// Scope of the collection (ex. "_default" if not specified)
+    scope: option<string>,
+    /// Name of the collection (which may be a simple name, if only this value is specified)
+    name: collection-name,
+  }
+
+  /// Errors that can occur during operations on documents
+  variant document-error {
+    /// Document could not be found
+    not-found,
+    /// CAS revision submitted to operation does not match value on server
+    cas-mismatch,
+    /// A write was refused because another client holds a lock on the
+    /// document.
+    locked,
+    /// An operation expected the document to be locked and it was not.
+    not-locked,
+    /// The document could not be retrieved from any replica.
+    unretrievable,
+    /// Document already exists (i.e. a duplicate)
+    already-exists,
+    /// Document is not JSON
+    not-json,
+    /// Document does not contain the specified sub-document path
+    path-not-found,
+    /// Sub-document path is invalid (could not be parsed)
+    path-invalid,
+    /// Sub-document path is too deeply nested
+    path-too-deep,
+    /// Sub-document operation could not insert
+    invalid-value,
+    /// An invalid delta is used when performing a sub-document operation
+    subdocument-delta-invalid,
+
+    // ---------------------------------------------------------------------
+    // DIFFERS FROM 0.1.0-draft: the cases below are additions.
+    //
+    // 0.1.0-draft's `document-error` can only describe things the *document*
+    // did wrong. It has no way to say "the credentials were refused", "the
+    // cluster never answered", or "this workload has no binding" — all of
+    // which an implementation has to be able to report. Every 0.1.0-draft case
+    // above is unchanged, so existing match arms keep working; a `variant` is
+    // non-exhaustive in generated bindings, so consumers already carry a
+    // catch-all arm for these.
+    // ---------------------------------------------------------------------
+
+    /// The configured credentials were refused, or they do not grant this
+    /// operation on this bucket.
+    unauthorized,
+    /// The caller has no Couchbase binding, or its binding is missing required
+    /// configuration. A deploy-time problem rather than a transient one; the
+    /// message names what is missing.
+    not-configured(string),
+    /// The cluster could not be reached: DNS, TLS, connection, or a transport
+    /// error mid-response. Retrying may succeed.
+    request-failed(string),
+    /// The operation did not complete within the configured time limit.
+    timeout,
+    /// The operation is well-formed but this implementation cannot serve it.
+    /// The message says why and what to use instead.
+    unsupported(string),
+    /// The request was rejected as malformed before or by the cluster.
+    invalid-argument(string),
+    /// Some other implementation-specific failure.
+    other(string),
+  }
+
+  /// How a document's bytes are encoded, as Couchbase "common flags".
+  ///
+  /// Every SDK writes this alongside the value and reads it back to pick a
+  /// transcoder, so it is what tells a binary document apart from a JSON one.
+  /// The JSON value every SDK uses by default is `0x02000006`.
+  type document-flags = u32;
+
+  /// A document's value: the bytes Couchbase stores, exactly as stored.
+  ///
+  /// DIFFERS FROM 0.1.0-draft, which models this as
+  /// `variant document { raw(json-string), %resource(document-value) }`.
+  ///
+  /// Bytes rather than JSON text, because a Couchbase document is not
+  /// necessarily JSON. Binary documents are first-class — that is what
+  /// `append`/`prepend` and the counter operations act on, and what
+  /// `document-flags` exists to describe. A `string` cannot hold one at all:
+  /// it would have to fail on any value that is not valid UTF-8. JSON remains
+  /// the common case, and is simply those bytes with JSON flags.
+  ///
+  /// The `document-value` resource is gone with it. It existed to offer an
+  /// "efficient implementer-specific" JSON representation, but a resource a
+  /// caller constructs cannot cross a component host plugin's store boundary
+  /// (see the note on the `document` interface), and in practice it wrapped a
+  /// string anyway. `list<u8>` is both the honest model and the portable one.
+  type document = list<u8>;
+
+  /// Errors related to bucket usage
+  variant bucket-error {
+    /// A completely unexpected error
+    unexpected(string)
+  }
+
+  /// Metadata related to any mutation on a Couchbase collection (ex. CRUD operations)
+  /// NOTE ON THE VBUCKET FIELDS: `cas` and `bucket` are always populated, but
+  /// `partition-id`, `partition-uuid` and `seq` describe a *mutation token*,
+  /// which not every implementation surfaces. One that cannot obtain a token
+  /// reports all three as `0` rather than inventing values, so check for a
+  /// non-zero `partition-uuid` before trusting them.
+  ///
+  /// Consequently: do not build a `mutation-state` out of these fields to pass
+  /// as `sqlpp-query-options.consistent-with`. Three zeroes are not a token,
+  /// and a query asked to be consistent with one is not made consistent with
+  /// anything — it simply will not observe the write you meant to wait for,
+  /// silently. Check for a non-zero `partition-uuid` before treating these as
+  /// real, and reach for `query-scan-consistency.request-plus` when what you
+  /// actually need is read-your-writes.
+  record mutation-metadata {
+    /// CAS revision of the document
+    cas: u64,
+    /// The bucket on which the mutation was performed
+    bucket: string,
+    /// The ID of the vbucket (partition) that the operation was performed on.
+    /// `0` when the implementation has no mutation token; see the note above.
+    partition-id: u64,
+    /// The UUID of the vbucket (partition) that the operation was performed on.
+    /// `0` when the implementation has no mutation token; see the note above.
+    partition-uuid: u64,
+    /// The sequence number of the operation performed on the vbucket (partition).
+    /// `0` when the implementation has no mutation token; see the note above.
+    seq: u64,
+
+    /// DIFFERS FROM 0.1.0-draft: an addition.
+    ///
+    /// The implementation's mutation token exactly as it was received, when it
+    /// arrived in a form this implementation could not take apart into the
+    /// fields above.
+    ///
+    /// Present only in that case: a token that parsed leaves this `none` and
+    /// fills the fields instead. It exists so an unrecognized encoding is
+    /// visible rather than silently discarded — report what turns up here and
+    /// it can be parsed properly.
+    raw-token: option<string>,
+  }
+
+  /// Durability level that should be used for operations
+  enum durability-level {
+    unknown,
+
+    none,
+
+    /// Replicate (hold in memory) to a majority of nodes
+    replicate-majority,
+
+    /// Replicate (hold in memory) to a majority of nodes, persist (write to disk) to master
+    replicate-majority-persist-master,
+
+    /// Persist to a majority of nodes
+    persist-majority,
+  }
+
+  /// As functions cannot be represented as part of types in WIT,
+  /// we represent static retry strategies
+  variant retry-strategy {
+    /// Retry a certain number of times with a given interval between each retry)
+    interval-times-ms(tuple<u64, u64>),
+  }
+
+  /// Level of data consistency required for a query
+  enum query-scan-consistency {
+    /// No data consistency required
+    not-bounded,
+    /// Request-level data consistency is required
+    request-plus,
+  }
+
+  /// Profiling mode to use during a query
+  enum query-profile-mode {
+    /// Disable query profiling
+    none,
+    /// Include phase-boudned profiling information in the response
+    phases,
+    /// Include timing profiling informatoin in the query response
+    timings,
+  }
+
+  /// Level of data consistency required for a search
+  enum search-scan-consistency {
+    /// No data consistency required
+    not-bounded,
+  }
+
+  /// Individual mutation token
+  /// A token is only meaningful if an implementation actually produced one.
+  /// See the note on `mutation-metadata`: where mutation tokens are
+  /// unavailable, its vbucket fields are zero and must not be assembled into a
+  /// token here.
+  record mutation-token {
+    bucket-name: string,
+    partition-uuid: u64,
+    partition-id: u64,
+    sequence-number: u64,
+  }
+
+  /// Collection of mutation tokens that represent a single state
+  record mutation-state {
+    tokens: list<mutation-token>,
+  }
+}
+
+/// Mappings of SQL++ (formerly known as N1QL) to WebAssembly (WIT) types
+///
+interface sqlpp-types {
+  use types.{json-string};
+
+  /// Errors that can occur when a SQL++ query is performed
+  variant sqlpp-query-error {
+    /// A completely unexpected query error
+    unexpected(string),
+
+    // -------------------------------------------------------------------
+    // DIFFERS FROM 0.1.0-draft: additions, for the same reason as the
+    // `document-error` additions above — a lone `unexpected(string)` cannot
+    // distinguish a syntax error from a refused credential from an
+    // unreachable cluster.
+    // -------------------------------------------------------------------
+
+    /// The statement was rejected as malformed, by this implementation or by
+    /// the cluster. Carries the cluster's own message where there is one.
+    invalid-argument(string),
+    /// The configured credentials were refused.
+    unauthorized,
+    /// The caller has no Couchbase binding, or it is missing configuration.
+    not-configured(string),
+    /// The cluster could not be reached.
+    request-failed(string),
+    /// The query did not complete within its time limit.
+    timeout,
+    /// The cluster reported an error that maps to no case above.
+    server(string),
+  }
+
+  /// An embedding of SQL++ values to WebAssembly types
+  ///
+  /// This type should be used in building queries, and also in parsing/processing results,
+  /// as it is used for both parameters and returned results from queries.
+  variant sqlpp-value {
+    /// A NULL value
+    null,
+
+    // -------------------------------------------------------------------
+    // DIFFERS FROM 0.1.0-draft: `json` is an addition.
+    //
+    // 0.1.0-draft declares `sqlpp-value` with `null` as its only case, which
+    // cannot carry a parameter into a query or a row out of one. Rather than
+    // enumerate a JSON tree — which WIT cannot express recursively, the same
+    // constraint `document` works around — a value travels as JSON text, the
+    // approach `document.raw` already established in this package.
+    // -------------------------------------------------------------------
+
+    /// A value as UTF-8 JSON text: `"\"LAX\""` for a string, `42` for a
+    /// number, `{"a":1}` for an object. A query's whole result set arrives as
+    /// a JSON array of rows.
+    json(json-string),
+  }
+}
+
+/// Support CRUD access and modification of Documents stored in a Couchbase cluster.
+///
+/// Reference: https://docs.couchbase.com/c-sdk/current/concept-docs/documents.html
+///
+/// DIFFERS FROM 0.1.0-draft: every function is an `async func`. Signatures,
+/// names and option records are otherwise unchanged.
+///
+/// Which bucket, scope and collection these operate on is not a parameter here,
+/// exactly as in 0.1.0-draft: it comes from the caller's link/interface
+/// configuration.
+interface document {
+  use types.{
+      document, document-flags, document-id, document-error, mutation-metadata, time, durability-level,
+      retry-strategy, request-span, replica-read-level
+  };
+
+  /////////////////////////
+  /// Document - Insert ///
+  /////////////////////////
+
+  /// Options for performing a document insert
+  record document-insert-options {
+    /// When the document should expire (nanoseconds)
+    expires-in-ns: u64,
+
+    /// (Deprecated)
+    /// Traditional durability settings for persistence, only usable from Couchbase versions earlier than 6.0
+    ///
+    /// See: https://docs.couchbase.com/go-sdk/current/howtos/subdocument-operations.html#1.6@go-sdk::durability.adoc
+    persist-to: u64,
+
+    /// (Deprecated)
+    /// Traditional durability settings for replication, only usable from Couchbase versions earlier than 6.0
+    ///
+    /// See: https://docs.couchbase.com/go-sdk/current/howtos/subdocument-operations.html#1.6@go-sdk::durability.adoc
+    replicate-to: u64,
+
+    /// Durability level for the mutation
+    ///
+    /// (this should be used instead of persist-to/replicate-to)
+    durability-level: durability-level,
+
+    /// Common flags to store with the value, describing how it is encoded.
+    /// `none` stores it as JSON, which is what an SDK reading it back will
+    /// expect. Set this when writing anything else — a binary blob, a bare
+    /// UTF-8 string — or a reader will transcode it wrongly.
+    %flags: option<document-flags>,
+
+    /// Timeout that should be used, in nanoseconds
+    /// Even if a timeout is not specified, the implementer *may* provide a default timeout.
+    timeout-ns: option<u64>,
+
+    /// How and whether to retry the operation
+    retry-strategy: option<retry-strategy>,
+
+    /// A known span to associate this lookup with
+    parent-span: option<request-span>,
+  }
+
+  /// Insert a document with a new ID
+  insert: async func(
+    id: document-id,
+    doc: document,
+    options: option<document-insert-options>,
+  ) -> result<mutation-metadata, document-error>;
+
+  //////////////////////////
+  /// Document - Replace ///
+  //////////////////////////
+
+  /// Options for performing a document replace
+  record document-replace-options {
+    /// CAS revision of the document
+    cas: u64,
+
+    /// When the document should expire (nanoseconds)
+    expires-in-ns: u64,
+
+    /// Whether to preserve expiration values set on any documents modified by the query
+    preserve-expiry: bool,
+
+    /// (Deprecated)
+    /// Traditional durability settings for persistence, only usable from Couchbase versions earlier than 6.0
+    persist-to: u64,
+
+    /// (Deprecated)
+    /// Traditional durability settings for replication, only usable from Couchbase versions earlier than 6.0
+    replicate-to: u64,
+
+    /// Durability level for the mutation
+    durability-level: durability-level,
+
+    /// Common flags to store with the value, describing how it is encoded.
+    /// `none` stores it as JSON, which is what an SDK reading it back will
+    /// expect. Set this when writing anything else — a binary blob, a bare
+    /// UTF-8 string — or a reader will transcode it wrongly.
+    %flags: option<document-flags>,
+
+    /// Timeout that should be used, in nanoseconds
+    timeout-ns: option<u64>,
+
+    /// How and whether to retry the operation
+    retry-strategy: option<retry-strategy>,
+
+    /// A known span to associate this lookup with
+    parent-span: option<request-span>,
+  }
+
+  /// Replace an existing document
+  replace: async func(
+    id: document-id,
+    doc: document,
+    options: option<document-replace-options>,
+  ) -> result<mutation-metadata, document-error>;
+
+  /////////////////////////
+  /// Document - Upsert ///
+  /////////////////////////
+
+  /// Options for performing a document upsert
+  record document-upsert-options {
+    /// When the document should expire (nanoseconds)
+    expires-in-ns: u64,
+
+    /// Whether to preserve expiration values set on any documents modified by the query
+    preserve-expiry: bool,
+
+    /// (Deprecated)
+    /// Traditional durability settings for persistence, only usable from Couchbase versions earlier than 6.0
+    persist-to: u64,
+
+    /// (Deprecated)
+    /// Traditional durability settings for replication, only usable from Couchbase versions earlier than 6.0
+    replicate-to: u64,
+
+    /// Durability level for the mutation
+    durability-level: durability-level,
+
+    /// Common flags to store with the value, describing how it is encoded.
+    /// `none` stores it as JSON, which is what an SDK reading it back will
+    /// expect. Set this when writing anything else — a binary blob, a bare
+    /// UTF-8 string — or a reader will transcode it wrongly.
+    %flags: option<document-flags>,
+
+    /// Timeout that should be used, in nanoseconds
+    timeout-ns: option<u64>,
+
+    /// How and whether to retry the operation
+    retry-strategy: option<retry-strategy>,
+
+    /// A known span to associate this lookup with
+    parent-span: option<request-span>,
+  }
+
+  /// Insert a document, or replace it if it already exists
+  upsert: async func(
+    id: document-id,
+    doc: document,
+    options: option<document-upsert-options>,
+  ) -> result<mutation-metadata, document-error>;
+
+  //////////////////////
+  /// Document - Get ///
+  //////////////////////
+
+  /// Options for performing a document get
+  record document-get-options {
+    /// Whether expiry should also be retreived
+    with-expiry: bool,
+
+    /// Perform a projection of only specific paths of the result, returning only
+    /// the fields indicated by the given list of paths.
+    project: option<list<string>>,
+
+    /// Whether this read may be served by a replica.
+    use-replica: option<replica-read-level>,
+
+    /// Timeout that should be used, in nanoseconds
+    timeout-ns: option<u64>,
+
+    /// How and whether to retry the operation
+    retry-strategy: option<retry-strategy>,
+
+    /// A known span to associate this lookup with
+    parent-span: option<request-span>,
+  }
+
+  /// Options for retrieving a document from any replica
+  record document-get-any-replica-options {
+    /// Timeout that should be used, in nanoseconds
+    timeout-ns: option<u64>,
+
+    /// How and whether to retry the operation
+    retry-strategy: option<retry-strategy>,
+
+    /// A known span to associate this lookup with
+    parent-span: option<request-span>,
+  }
+
+  /// Options for retrieving a document from all replicas
+  record document-get-all-replica-options {
+    /// Timeout that should be used, in nanoseconds
+    timeout-ns: option<u64>,
+
+    /// How and whether to retry the operation
+    retry-strategy: option<retry-strategy>,
+
+    /// A known span to associate this lookup with
+    parent-span: option<request-span>,
+  }
+
+  /// Result of a successfully executed document get
+  record document-get-result {
+    /// Document that was retrieved
+    document: document,
+
+    /// Common flags stored with the document, describing how `document` is
+    /// encoded. `0` if the cluster reported none.
+    %flags: document-flags,
+
+    /// CAS revision of the document
+    cas: u64,
+
+    /// When the document should expire (nanoseconds)
+    ///
+    /// Deprecated: use expires-at instead
+    expires-in-ns: option<u64>,
+
+    /// Time when the document expires
+    ///
+    /// This field may not be present if `document-get-options.with-expiry` is not set
+    expires-at: option<time>,
+  }
+
+
+  /// Retrieve a document by ID
+  ///
+  /// A missing document is `document-error.not-found`, matching 0.1.0-draft.
+  get: async func(
+    id: document-id,
+    options: option<document-get-options>,
+  ) -> result<document-get-result, document-error>;
+
+  /// Result from a replica-aware document get
+  record document-get-replica-result {
+    /// Whether this document came from a replica rather than the active node.
+    is-replica: bool,
+
+    /// Document that was retrieved
+    document: document,
+
+    /// Common flags stored with the document, describing how `document` is
+    /// encoded. `0` if the cluster reported none.
+    %flags: document-flags,
+
+    /// CAS revision of the document
+    cas: u64,
+
+    /// When the document should expire (nanoseconds)
+    ///
+    /// Deprecated: use expires-at instead
+    expires-in-ns: option<u64>,
+
+    /// Time when the document expires
+    expires-at: option<time>,
+  }
+
+  /// Retrieve a document by ID from the active node or any replica, whichever
+  /// answers first.
+  ///
+  /// A replica may be stale: it holds what it has received so far, which can
+  /// lag the active copy. Use it to stay readable while the active node is
+  /// unavailable, not to read your own writes.
+  ///
+  /// `document-error.unretrievable` when no copy answers.
+  ///
+  /// Requires a transport that can address replicas. Implementations that
+  /// cannot return `document-error.unsupported`.
+  get-any-replicas: async func(
+    id: document-id,
+    options: option<document-get-any-replica-options>,
+  ) -> result<document-get-replica-result, document-error>;
+
+  /// Retrieve every available copy of a document, active and replica.
+  ///
+  /// The copies may disagree: each carries its own CAS, and `is-replica` says
+  /// which is the active one. Bounded by the bucket's replica count.
+  ///
+  /// Requires a transport that can address replicas. Implementations that
+  /// cannot return `document-error.unsupported`.
+  get-all-replicas: async func(
+    id: document-id,
+    options: option<document-get-all-replica-options>,
+  ) -> result<list<document-get-replica-result>, document-error>;
+
+
+
+
+
+  /////////////////////////
+  /// Document - Remove ///
+  /////////////////////////
+
+  /// Options for performing a document remove
+  record document-remove-options {
+    /// CAS revision of the document
+    cas: u64,
+
+    /// (Deprecated)
+    /// Traditional durability settings for persistence, only usable from Couchbase versions earlier than 6.0
+    persist-to: u64,
+
+    /// (Deprecated)
+    /// Traditional durability settings for replication, only usable from Couchbase versions earlier than 6.0
+    replicate-to: u64,
+
+    /// Durability level for the mutation
+    durability-level: durability-level,
+
+    /// Timeout that should be used, in nanoseconds
+    timeout-ns: option<u64>,
+
+    /// How and whether to retry the operation
+    retry-strategy: option<retry-strategy>,
+
+    /// A known span to associate this lookup with
+    parent-span: option<request-span>,
+  }
+
+  /// Remove a document by ID
+  remove: async func(
+    id: document-id,
+    options: option<document-remove-options>,
+  ) -> result<mutation-metadata, document-error>;
+
+  ///////////////////////////////
+  /// Document - Get and Lock ///
+  ///////////////////////////////
+
+  /// Options for performing a document lock
+  record document-get-and-lock-options {
+    /// Amount of time to lock the document (nanoseconds)
+    lock-time: u64,
+
+    /// Timeout that should be used, in nanoseconds
+    timeout-ns: option<u64>,
+
+    /// How and whether to retry the operation
+    retry-strategy: option<retry-strategy>,
+
+    /// A known span to associate this lookup with
+    parent-span: option<request-span>,
+  }
+
+  /// Retrieve and lock a document by ID
+  ///
+  /// The returned CAS is the lock's: only that value unlocks the document, and
+  /// only it writes through the lock. The lock lapses on its own, so a caller
+  /// that dies does not hold it forever.
+  get-and-lock: async func(
+    id: document-id,
+    options: option<document-get-and-lock-options>,
+  ) -> result<document-get-result, document-error>;
+
+  /////////////////////////
+  /// Document - Unlock ///
+  /////////////////////////
+
+  /// Options for performing a document unlock
+  record document-unlock-options {
+    /// CAS revision of the document
+    cas: u64,
+
+    /// Timeout that should be used, in nanoseconds
+    timeout-ns: option<u64>,
+
+    /// How and whether to retry the operation
+    retry-strategy: option<retry-strategy>,
+
+    /// A known span to associate this lookup with
+    parent-span: option<request-span>,
+  }
+
+  /// Release a lock taken by `get-and-lock`
+  ///
+  /// See `get-and-lock` on which implementations can serve this.
+  unlock: async func(
+    id: document-id,
+    options: option<document-unlock-options>,
+  ) -> result<_, document-error>;
+
+  ////////////////////////
+  /// Document - Touch ///
+  ////////////////////////
+
+  /// Options for performing a document touch
+  record document-touch-options {
+    /// Time until the document expires (nanoseconds)
+    expires-in: u64,
+
+    /// Timeout that should be used, in nanoseconds
+    timeout-ns: option<u64>,
+
+    /// How and whether to retry the operation
+    retry-strategy: option<retry-strategy>,
+
+    /// A known span to associate this lookup with
+    parent-span: option<request-span>,
+  }
+
+  /// Update a document's expiry without changing its content
+  touch: async func(
+    id: document-id,
+    options: option<document-touch-options>,
+  ) -> result<mutation-metadata, document-error>;
+
+  ////////////////////////////////
+  /// Document - Get and Touch ///
+  ////////////////////////////////
+
+  /// Options for performing a document touch
+  record document-get-and-touch-options {
+    /// Time until the document expires (nanoseconds)
+    expires-in: u64,
+
+    /// Timeout that should be used, in nanoseconds
+    timeout-ns: option<u64>,
+
+    /// How and whether to retry the operation
+    retry-strategy: option<retry-strategy>,
+
+    /// A known span to associate this lookup with
+    parent-span: option<request-span>,
+  }
+
+  /// Retrieve and Touch a document by ID
+  get-and-touch: async func(
+    id: document-id,
+    options: option<document-get-and-touch-options>,
+  ) -> result<document-get-result, document-error>;
+}
+
+/// Supports arbitrary queries written in SQL++ (formerly known as N1QL) on a Couchbase cluster.
+///
+/// Reference: https://docs.couchbase.com/server/current/n1ql/n1ql-language-reference/index.html
+///
+/// DIFFERS FROM 0.1.0-draft: `query` is an `async func`. Otherwise unchanged.
+interface sqlpp {
+  use types.{mutation-state, query-scan-consistency, query-profile-mode, retry-strategy, request-span};
+  use sqlpp-types.{sqlpp-value, sqlpp-query-error};
+
+  /// Status of a SQL++ query
+  enum sqlpp-query-status {
+    unknown,
+    running,
+    success,
+    errors,
+    completed,
+    stopped,
+    timeout,
+    closed,
+    fatal,
+    aborted,
+  }
+
+  /// Query metrics
+  record sqlpp-query-metrics {
+    elapsed-time-ns: u64,
+    execution-time-ns: u64,
+    result-count: u64,
+    result-size: u64,
+    mutation-count: u64,
+    sort-count: u64,
+    error-count: u64,
+    warning-count: u64,
+  }
+
+  /// Warnings on SQL queries
+  record sqlpp-query-warning {
+    code: u32,
+    message: string,
+  }
+
+  /// Options usable when performing a SQL++ query
+  record sqlpp-query-options {
+    scan-consistency: query-scan-consistency,
+
+    /// Scan the index at least as current as these mutation tokens.
+    ///
+    /// Only usable with tokens an implementation genuinely produced. Where
+    /// mutation tokens are unavailable — see the note on
+    /// `types.mutation-metadata` — this cannot be satisfied, and passing tokens
+    /// assembled from its zeroed vbucket fields fails *silently*: the query
+    /// runs without waiting for anything, so a just-written document may not
+    /// appear. Prefer `scan-consistency.request-plus` when what you need is to
+    /// observe your own writes; it is honoured everywhere and costs one wait
+    /// rather than a wrong answer.
+    consistent-with: option<mutation-state>,
+
+    /// Whether or not to profile the query
+    profile: option<query-profile-mode>,
+
+    /// Maximum buffered channel size between indexer connection manager and query service
+    /// when performing index scans
+    scan-cap: u32,
+
+    /// Controls the nubmer of items execution operators can batch for Fetch from KV
+    pipeline-batch: u32,
+
+    /// Controls the nubmer of items execution operators can buffer between various operators
+    pipeline-cap: u32,
+
+    /// How long the indexer is allowed to wait until it can satisfy consistency criteria (in nanoseconds)
+    scan-wait-ns: u64,
+
+    /// Whether the query is readonly
+    readonly: bool,
+
+    /// Number of index partitions to use when computing aggregations in parallel
+    max-parallelism: u32,
+
+    /// Unique ID for this query which is used by connection manager and the server
+    /// A generated UUID value will be assigned if this value is not provided
+    client-context-id: option<string>,
+
+    /// Whether to enable metrics collection
+    metrics: bool,
+
+    /// Whether the query is adhoc
+    ad-hoc: bool,
+
+    /// Timeout on the query in nanoseconds
+    timeout-ns: u64,
+
+    /// How and whether to retry the operation
+    retry-strategy: option<retry-strategy>,
+
+    /// A known span to associate this lookup with
+    parent-span: option<request-span>,
+
+    /// Whether to preserve expiration values set on any documents modified by the query
+    preserve-expiry: bool,
+
+    /// Whether to use a flex a index (i.e. using the search service)
+    use-flex-index: bool,
+
+  }
+
+  /// Perform a N1QL query
+  ///
+  /// Note: you may *only* use positional parameters in your query
+  ///
+  /// The result is a `sqlpp-value.json` holding the service's `results` array
+  /// as JSON text — one element per row.
+  query: async func(
+    query: string,
+    params: list<sqlpp-value>,
+    options: option<sqlpp-query-options>,
+  ) -> result<sqlpp-value, sqlpp-query-error>;
+}

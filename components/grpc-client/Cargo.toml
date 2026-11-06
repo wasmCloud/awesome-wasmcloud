@@ -1,0 +1,18 @@
+[package]
+name = "grpc-client"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+name = "grpc_client"
+
+[dependencies]
+wit-bindgen = { version = "0.60.0", features = ["async-spawn", "inter-task-wakeup"] }
+
+[profile.release]
+opt-level = "s"
+strip = true
+
+[workspace]

@@ -1,0 +1,150 @@
+# A self-hosted Couchbase stack with the real Data API in front of it.
+#
+# The Data API is served by the Cloud Native Gateway (CNG,
+# github.com/couchbase/stellar-gateway), which fronts Capella and runs
+# self-hosted in front of any cluster. Couchbase Server does not serve it
+# itself. The ETag format (bare 16-digit hex) and the mutation-token format
+# (`bucket:vbid:vbuuid:seqno`) are the ones live Capella sends.
+#
+#   docker compose up -d      # cluster + CNG, initialized and ready
+#   docker compose down -v    # tear it all down
+#
+# The Data API is HTTPS only, on https://<host>:18008, under a CA this stack
+# generates into ./tls/ (gitignored, per machine). The plugin's host has to
+# trust it: in `wash dev`, list tls/ca.crt under `dev.http_client_ca_paths`.
+# Set CNG_SAN before `up` to name the address the plugin will dial -- a guest's
+# 127.0.0.1 is its *virtual* network, so that is usually the LAN address, e.g.
+#   CNG_SAN=IP:192.168.1.20 docker compose up -d
+
+services:
+  couchbase:
+    image: couchbase:enterprise-7.6.4
+    container_name: cb-verify
+    ports:
+      - "8091:8091" # management / UI
+      - "8093:8093" # query service
+      - "11210:11210" # kv
+    healthcheck:
+      # `/pools` answers as soon as the node is up, and what we want to know is
+      # that it is answering at all.
+      #
+      # It cannot be `curl -sf`: an unconfigured node answers 200, but once the
+      # init step below provisions the cluster the same endpoint starts
+      # answering 401, and `-f` turns that into a failure. The node would go
+      # healthy on a fresh volume and then unhealthy the moment it was
+      # configured — so a second `up` against a kept volume fails immediately
+      # with "dependency failed to start", pointing at the wrong thing.
+      test:
+        - CMD-SHELL
+        - "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8091/pools | grep -qE '^(200|401)$$'"
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 10s
+
+  # One-shot: configures the node, creates the bucket, and adds the application
+  # credential the plugin authenticates with. Exits 0 when the cluster is usable.
+  couchbase-init:
+    image: couchbase:enterprise-7.6.4
+    container_name: cb-verify-init
+    depends_on:
+      couchbase:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        CB=couchbase://couchbase
+        ADMIN="--cluster-username Administrator --cluster-password password123"
+
+        # cluster-init is not idempotent -- it errors on an already-configured
+        # node -- so check first and `docker compose up` stays re-runnable
+        # against an existing volume.
+        if couchbase-cli server-list -c $$CB -u Administrator -p password123 >/dev/null 2>&1; then
+          echo "cluster already initialized"
+        else
+          couchbase-cli cluster-init -c $$CB $$ADMIN \
+            --services data,query,index \
+            --cluster-ramsize 1024 --cluster-index-ramsize 512
+        fi
+
+        until couchbase-cli server-list -c $$CB -u Administrator -p password123 >/dev/null 2>&1; do
+          echo "waiting for the cluster to accept management calls..."; sleep 2
+        done
+
+        # --bucket-replica 0 because this is a single node; the default of 1
+        # cannot be satisfied and makes the create fail noisily.
+        if couchbase-cli bucket-list -c $$CB -u Administrator -p password123 2>/dev/null | grep -q '^testbucket$$'; then
+          echo "bucket testbucket already exists"
+        else
+          couchbase-cli bucket-create -c $$CB -u Administrator -p password123 \
+            --bucket testbucket --bucket-type couchbase --bucket-ramsize 256 \
+            --bucket-replica 0 --enable-flush 1 --wait
+        fi
+
+        couchbase-cli user-manage -c $$CB -u Administrator -p password123 \
+          --set --rbac-username appuser --rbac-password apppass123 --auth-domain local \
+          --roles 'data_reader[testbucket],data_writer[testbucket],query_select[testbucket],query_insert[testbucket],query_update[testbucket],query_delete[testbucket],query_manage_index[testbucket]' \
+          || echo "user already exists"
+
+        echo "READY: bucket=testbucket user=appuser/apppass123"
+
+  # One-shot: a CA and a CNG leaf certificate, reused across runs. The leaf's
+  # subject alternative names are what a client checks the address it dialled
+  # against, so they must include whatever the plugin's `endpoint` names.
+  cng-certs:
+    image: couchbase:enterprise-7.6.4
+    container_name: cb-verify-certs
+    restart: "no"
+    volumes:
+      - ./tls:/tls
+    environment:
+      CNG_SAN: ${CNG_SAN:-IP:127.0.0.1}
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        cd /tls
+        if [ ! -f ca.crt ]; then
+          openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -sha256 \
+            -keyout ca.key -out ca.crt -subj "/CN=cb-verify-local-ca" 2>/dev/null
+        fi
+        # The leaf is reissued every run, so a changed CNG_SAN (the laptop
+        # moved networks) takes effect without deleting the CA it chains to.
+        openssl req -newkey rsa:2048 -nodes -keyout cng.key -out cng.csr \
+          -subj "/CN=cb-verify-cng" 2>/dev/null
+        printf 'subjectAltName = DNS:localhost, IP:127.0.0.1, %s\n' "$$CNG_SAN" > cng.ext
+        openssl x509 -req -in cng.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+          -out cng.crt -days 825 -sha256 -extfile cng.ext 2>/dev/null
+        # CNG runs as an unprivileged user in a scratch image.
+        chmod 0644 cng.key cng.crt ca.crt
+        echo "issued for: $$(openssl x509 -in cng.crt -noout -ext subjectAltName | tail -1)"
+
+  # The Cloud Native Gateway: Protostellar gRPC on 18098, the Data API on 18008.
+  # `--dapi-proxy-services query` enables the `/_p/query/...` passthrough the
+  # plugin's SQL++ path uses. The image is FROM scratch, so there is no shell
+  # to run a healthcheck with; demo.sh probes it from the host instead.
+  cng:
+    image: couchbase/cloud-native-gateway:1.2.1
+    container_name: cb-verify-cng
+    depends_on:
+      couchbase-init:
+        condition: service_completed_successfully
+      cng-certs:
+        condition: service_completed_successfully
+    ports:
+      - "18008:18008" # Data API (HTTPS)
+      - "18098:18098" # Protostellar gRPC
+    volumes:
+      - ./tls:/tls:ro
+    command:
+      - --cb-host=couchbase
+      - --cb-user=Administrator
+      - --cb-pass=password123
+      - --dapi-port=18008
+      - --dapi-proxy-services=query
+      # Document locking lives under /v1.alpha; without this the endpoints 404.
+      - --alpha-endpoints
+      - --cert=/tls/cng.crt
+      - --key=/tls/cng.key
