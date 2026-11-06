@@ -30,10 +30,25 @@ pub struct Binding {
     pub bucket: String,
     pub scope: String,
     pub collection: String,
+    /// How long a call may run, in milliseconds.
     pub timeout_ms: u32,
 }
 
 impl Binding {
+    /// A copy of this binding with a per-call timeout applied.
+    ///
+    /// `none` and `0` both mean "unset" and keep the binding's own timeout.
+    /// Sub-millisecond values round up to 1ms rather than down to zero.
+    pub fn with_timeout_ns(&self, timeout_ns: Option<u64>) -> Self {
+        let Some(ns) = timeout_ns.filter(|ns| *ns > 0) else {
+            return self.clone();
+        };
+        Self {
+            timeout_ms: ns.div_ceil(1_000_000).min(u32::MAX.into()) as u32,
+            ..self.clone()
+        }
+    }
+
     /// Validate one workload's interface config.
     ///
     /// The error string is surfaced verbatim in the deploy failure, so it names
@@ -84,10 +99,14 @@ impl Binding {
 
     /// Everything that decides which cluster and identity a connection serves.
     /// Two workloads matching on all of it share a connection.
+    ///
+    /// The password is part of it: a connection is authenticated once, so
+    /// without it a binding holding the wrong password would be handed another's
+    /// connection and never be told.
     pub fn connection_key(&self) -> String {
         format!(
-            "{}:{}|{}|{}|{}.{}",
-            self.host, self.port, self.username, self.bucket, self.scope, self.collection
+            "{}:{}|{}|{}|{}|{}.{}",
+            self.host, self.port, self.username, self.password, self.bucket, self.scope, self.collection
         )
     }
 }
@@ -198,6 +217,16 @@ mod tests {
     }
 
     #[test]
+    fn a_per_call_timeout_overrides_the_bindings() {
+        let binding = Binding::from_config(&minimal()).unwrap();
+        assert_eq!(binding.with_timeout_ns(Some(5_000_000_000)).timeout_ms, 5_000);
+        assert_eq!(binding.with_timeout_ns(None).timeout_ms, DEFAULT_TIMEOUT_MS);
+        assert_eq!(binding.with_timeout_ns(Some(0)).timeout_ms, DEFAULT_TIMEOUT_MS);
+        assert_eq!(binding.with_timeout_ns(Some(1)).timeout_ms, 1);
+        assert_eq!(binding.with_timeout_ns(Some(1_500_000)).timeout_ms, 2);
+    }
+
+    #[test]
     fn connections_are_keyed_by_identity_and_keyspace() {
         let a = Binding::from_config(&minimal()).unwrap();
         let mut other = minimal();
@@ -207,6 +236,16 @@ mod tests {
             a.connection_key(),
             b.connection_key(),
             "a different collection must not reuse another's connection"
+        );
+
+        let mut wrong_password = minimal();
+        wrong_password.retain(|(k, _)| k != "password");
+        wrong_password.push(("password".to_string(), "not-it".to_string()));
+        let c = Binding::from_config(&wrong_password).unwrap();
+        assert_ne!(
+            a.connection_key(),
+            c.connection_key(),
+            "a wrong password must not reuse another's authenticated connection"
         );
     }
 }

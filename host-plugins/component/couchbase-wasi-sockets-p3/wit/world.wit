@@ -16,12 +16,16 @@ world couchbase-wasi-sockets-p3-plugin {
     import wasi:http/types@0.3.0;
     import wasi:http/client@0.3.0;
 
-    /// Which workload is calling, so each gets its own cluster binding.
-    import wasmcloud:host/identity@0.1.1;
-    import wasmcloud:host/cancel@0.1.1;
+    /// Which workload and binding is calling, so each gets its own cluster.
+    import wasmcloud:host/identity@0.1.6;
+    import wasmcloud:host/cancel@0.1.6;
+    /// Keys of a binding filled from a plugin-backed secret, which its config
+    /// leaves out. Read as handles during a bind, then revealed.
+    import wasmcloud:host/binding-secrets@0.1.6;
+    import wasmcloud:secrets/reveal@2.1.0;
 
     /// Per-workload configuration, validated at deploy time.
-    export wasmcloud:host/workload-lifecycle@0.1.1;
+    export wasmcloud:host/workload-lifecycle@0.1.6;
 
     export wasmcloud:couchbase/types@0.2.0;
     export wasmcloud:couchbase/sqlpp-types@0.2.0;
