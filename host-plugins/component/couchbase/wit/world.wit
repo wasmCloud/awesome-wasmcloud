@@ -28,16 +28,16 @@ world couchbase-plugin {
     /// through this to find that workload's own cluster binding, so two
     /// workloads sharing this plugin never see each other's credentials or
     /// bucket.
-    import wasmcloud:host/identity@0.1.1;
+    import wasmcloud:host/identity@0.1.6;
 
     /// Cooperative cancellation, polled around the HTTP round-trip so a
     /// workload teardown does not have to wait out a hung cluster.
-    import wasmcloud:host/cancel@0.1.1;
+    import wasmcloud:host/cancel@0.1.6;
 
     /// Per-workload bind hooks. Configuration is validated here, at deploy
     /// time, so a workload with a missing endpoint or credentials fails to
     /// deploy with a clear message instead of failing on its first query.
-    export wasmcloud:host/workload-lifecycle@0.1.1;
+    export wasmcloud:host/workload-lifecycle@0.1.6;
 
     /// The capability itself: the asynchronous successor to the published
     /// `wasmcloud:couchbase@0.1.0-draft`, whose synchronous functions cannot be

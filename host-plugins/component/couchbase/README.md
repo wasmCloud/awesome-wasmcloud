@@ -60,7 +60,7 @@ note at the point it occurs in [`interface/couchbase.wit`](interface/couchbase.w
 ## Requirements
 
 - **Rust** with the `wasm32-wasip2` target (`rustup target add wasm32-wasip2`).
-- **`wash`** built from wasmCloud `main` (tested at `b8e535692`).
+- **`wash`** 2.12.0 or newer, for the `wasmcloud:host@0.1.6` WIT.
 - **A wasmCloud host built with the `host-component-plugins` Cargo feature.**
   This is opt-in and is *not* in the released `ghcr.io/wasmcloud/wash` images or
   the `:canary` tag. Build one with
@@ -400,7 +400,7 @@ a clock read, and it would be stale on arrival.
 - Its imports are `wasi:http/client@0.3.0`, `wasi:clocks/system-clock`,
   `wasmcloud:host/identity` and `wasmcloud:host/cancel`; its exports are the
   four `wasmcloud:couchbase` interfaces plus
-  `wasmcloud:host/workload-lifecycle@0.1.1`.
+  `wasmcloud:host/workload-lifecycle@0.1.6`.
 - 40 unit tests cover config validation, endpoint parsing, error classification,
   CAS and mutation-token parsing, URL segment encoding, the ISO 8601 conversion,
   and the `Expires` header.
@@ -439,9 +439,10 @@ A real mutation token parses structurally
 ### Still unverified
 
 - **`couchbases://` against Capella.** This implementation speaks the Data API
-  over HTTPS. The sibling [`couchbase-kv-sdk`](../couchbase-kv-sdk/) plugin speaks the
-  binary KV protocol and serves what this one cannot, but has so far been run
-  only against a self-hosted cluster.
+  over HTTPS. The sibling
+  [`couchbase-wasi-sockets-p3`](../couchbase-wasi-sockets-p3/) plugin speaks the
+  binary KV protocol and serves what this one cannot, but does not support TLS,
+  so it has been run only against a self-hosted cluster.
 - **Durability levels beyond the default.** `X-CB-DurabilityLevel` is sent but
   its effect has not been observed on a multi-node cluster; the test cluster is
   single-node, where `majority` is trivially satisfied.
