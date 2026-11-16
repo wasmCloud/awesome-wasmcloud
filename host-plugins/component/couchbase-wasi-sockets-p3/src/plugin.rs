@@ -3,7 +3,7 @@
 //! Compiled only for wasm. [`crate::proto`] and [`crate::config`] hold
 //! everything decidable without the bindings, and test on the host.
 //!
-//! Unlike the SDK-based sibling, nothing here blocks: every wait is an `await`
+//! Nothing here blocks: every wait is an `await`
 //! on `wasi:sockets@0.3.0`, so a call waiting on the cluster yields this
 //! plugin's executor to its other callers.
 

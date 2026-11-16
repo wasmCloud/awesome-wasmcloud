@@ -18,7 +18,7 @@
 
 services:
   couchbase:
-    image: couchbase:enterprise-7.6.4
+    image: couchbase:enterprise-8.0.3
     container_name: cb-verify
     ports:
       - "8091:8091" # management / UI
@@ -45,7 +45,7 @@ services:
   # One-shot: configures the node, creates the bucket, and adds the application
   # credential the plugin authenticates with. Exits 0 when the cluster is usable.
   couchbase-init:
-    image: couchbase:enterprise-7.6.4
+    image: couchbase:enterprise-8.0.3
     container_name: cb-verify-init
     depends_on:
       couchbase:
@@ -94,7 +94,7 @@ services:
   # subject alternative names are what a client checks the address it dialled
   # against, so they must include whatever the plugin's `endpoint` names.
   cng-certs:
-    image: couchbase:enterprise-7.6.4
+    image: couchbase:enterprise-8.0.3
     container_name: cb-verify-certs
     restart: "no"
     volumes:

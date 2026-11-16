@@ -6,5 +6,5 @@ edition = "2021"
 crate-type = ["cdylib"]
 name = "cbtest"
 [dependencies]
-wit-bindgen = { version = "0.60.0", features = ["async-spawn", "inter-task-wakeup"] }
+wit-bindgen = { version = "0.63.0", features = ["async-spawn", "inter-task-wakeup"] }
 [workspace]

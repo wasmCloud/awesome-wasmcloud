@@ -7,7 +7,7 @@ wit:
   #     `interface/`. That directory is what a consuming workload copies into
   #     its own `wit/deps/`.
   #   wasmcloud:host — defined and installed by the wasmCloud runtime itself,
-  #     vendored under `wit-deps/` from wasmCloud `main` so a clean checkout
+  #     vendored under `wit-deps/` from wasmCloud v2.12.0 so a clean checkout
   #     builds without depending on what happens to be published.
   #
   # The leading `./` is required: wash reads a bare `a/b` source as an OCI

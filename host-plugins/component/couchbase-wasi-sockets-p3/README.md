@@ -1,6 +1,6 @@
 # Couchbase KV Component Host Plugin (wasi:sockets)
 
-A third implementation of `wasmcloud:couchbase@0.2.0`, speaking Couchbase's KV
+The recommended implementation of `wasmcloud:couchbase@0.2.0`, speaking Couchbase's KV
 binary protocol directly over `wasi:sockets@0.3.0`. **No SDK and no gateway** —
 the protocol is implemented here: ~340 lines of wire format in `proto.rs` and
 ~215 of connection handling in `conn.rs`, plus the bindings glue.
@@ -9,12 +9,12 @@ This is the one to reach for when the Data API is not available: it needs
 nothing in front of the cluster, and talks to a stock Couchbase Server.
 
 The interface is not copied. [`.wash/config.yaml`](.wash/config.yaml) resolves
-`wasmcloud:couchbase` from `../couchbase/interface`, so the three
-implementations cannot drift.
+`wasmcloud:couchbase` from `../couchbase/interface`, so this plugin and the
+Data API plugin cannot drift.
 
 **Status: working.** 34/34 on the
 [shared verification scenario](../couchbase/verification/), the same score as
-the other two, against a real cluster. Also run as a host plugin on a wasmCloud
+the Data API plugin, against a real cluster. Also run as a host plugin on a wasmCloud
 2.12.0 cluster in Kubernetes.
 
 **Requires wasmCloud 2.12.0 or newer**, built with the `host-component-plugins`
@@ -24,16 +24,19 @@ do not provide.
 
 ## Why it exists
 
-| | this plugin | [`couchbase`](../couchbase/) | [`couchbase-kv-sdk`](../couchbase-kv-sdk/) |
-|---|---|---|---|
-| Transport | KV protocol, `wasi:sockets@0.3.0` | Data API, `wasi:http@0.3.0` | KV protocol, Couchbase Rust SDK |
-| Needs a gateway | no | **yes** (CNG, or Capella) | no |
-| Concurrent calls | interleave | interleave | **serialize** |
-| Dependencies | `serde_json` | `serde_json` | the SDK, tokio, rustls |
+| | this plugin | [`couchbase`](../couchbase/) |
+|---|---|---|
+| Transport | KV protocol, `wasi:sockets@0.3.0` | Data API, `wasi:http@0.3.0` |
+| Needs a gateway | no | **yes** (CNG, or Capella) |
+| Concurrent calls | interleave | interleave |
+| Dependencies | `serde_json` | `serde_json` |
 
 The Data API is served by the Cloud Native Gateway. Where that is not deployed,
-this plugin is the answer, and unlike the SDK-based sibling it neither blocks
-the plugin's store nor carries a vendored patch to compile.
+this plugin is the answer.
+
+An earlier plugin embedded the official Couchbase Rust SDK instead. It was
+removed: the SDK runs on Tokio under `block_on`, so its calls serialized, and its
+TLS stack pulls in `aws-lc-sys`, which needs a C toolchain to build for wasm.
 
 ## It awaits rather than blocks
 
@@ -48,7 +51,7 @@ Measured on one cluster, eight concurrent ~600ms queries:
 | no plugin at all (control) | 4,904 ms |
 | this plugin | **4,933 ms** |
 | `couchbase` (Data API) | 4,942 ms |
-| `couchbase-kv-sdk` (SDK, `block_on`) | 10,221 ms |
+| the removed SDK plugin (`block_on`) | 10,221 ms |
 
 Being within 29 ms of the control is the point: the plugin is transparent under
 concurrency, where an implementation that blocks costs 2×.
@@ -140,7 +143,7 @@ stderr, which reaches the host's log.
 
 ## Building
 
-Tested with `wash` 2.10.3 and Rust 1.97, targeting `wasm32-wasip2`.
+Tested with `wash` 2.12.0 and Rust 1.97, targeting `wasm32-wasip2`.
 
 ```console
 wash build
