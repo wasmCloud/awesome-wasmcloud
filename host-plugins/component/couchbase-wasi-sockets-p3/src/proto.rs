@@ -82,6 +82,20 @@ pub mod status {
 /// The JSON common-flags value, matching what every Couchbase SDK writes.
 pub const JSON_FLAGS: u32 = 0x0200_0006;
 
+/// Encode a relative TTL in the KV protocol's expiry field. Values above
+/// 30 days are Unix timestamps, not durations. Read the clock only when needed.
+pub fn expiry_seconds(expires_in_ns: u64, now: impl FnOnce() -> i64) -> Result<u32, String> {
+    const RELATIVE_LIMIT: u64 = 30 * 24 * 60 * 60;
+    let seconds = expires_in_ns.div_ceil(1_000_000_000);
+    let expiry = if seconds <= RELATIVE_LIMIT {
+        seconds
+    } else {
+        let now = u64::try_from(now()).map_err(|_| "the system clock is before the Unix epoch")?;
+        now.checked_add(seconds).ok_or("expiry timestamp overflowed")?
+    };
+    u32::try_from(expiry).map_err(|_| "expiry is beyond the KV protocol's timestamp range".to_string())
+}
+
 /// A parsed response header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResponseHeader {
@@ -344,6 +358,35 @@ pub fn civil_from_unix(unix_seconds: i64) -> Civil {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ttl_boundary_preserves_relative_and_absolute_expiries() {
+        const SECOND: u64 = 1_000_000_000;
+        const MONTH: u64 = 30 * 24 * 60 * 60;
+        let no_clock = || panic!("short TTLs do not need the wall clock");
+        assert_eq!(expiry_seconds(0, no_clock).unwrap(), 0);
+        assert_eq!(expiry_seconds(1, no_clock).unwrap(), 1);
+        assert_eq!(
+            expiry_seconds(MONTH * SECOND, no_clock).unwrap(),
+            MONTH as u32
+        );
+        assert_eq!(
+            expiry_seconds(MONTH * SECOND + 1, || 1_800_000_000).unwrap(),
+            1_800_000_000 + MONTH as u32 + 1
+        );
+        assert_eq!(
+            expiry_seconds(31 * 24 * 60 * 60 * SECOND, || 1_800_000_000).unwrap(),
+            1_802_678_400
+        );
+    }
+
+    #[test]
+    fn out_of_range_expiries_fail_instead_of_wrapping_or_expiring_now() {
+        let long = 31 * 24 * 60 * 60 * 1_000_000_000;
+        assert!(expiry_seconds(u64::MAX, || 1_800_000_000).is_err());
+        assert!(expiry_seconds(long, || i64::from(u32::MAX)).is_err());
+        assert!(expiry_seconds(long, || -1).is_err());
+    }
 
     #[test]
     fn a_request_frame_has_the_documented_layout() {

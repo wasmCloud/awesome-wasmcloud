@@ -9,6 +9,9 @@
 
 pub mod proto;
 
+#[path = "../../couchbase/src/query.rs"]
+pub mod query;
+
 #[cfg(target_family = "wasm")]
 mod bindings {
     #![allow(unsafe_code)]

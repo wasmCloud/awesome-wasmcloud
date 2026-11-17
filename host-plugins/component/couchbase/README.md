@@ -126,8 +126,9 @@ to deploy**, with a message naming the key at fault, instead of failing on its
 first query.
 
 Two workloads sharing this plugin never see each other's configuration: every
-call resolves its caller through `wasmcloud:host/identity` and looks up only
-that workload's binding.
+call resolves its caller through `wasmcloud:host/identity` and looks up that
+workload's binding by its import label. Multiple named bindings can use distinct
+clusters, credentials, and keyspaces within one workload.
 
 | Key | Required | Default | Meaning |
 |---|---|---|---|

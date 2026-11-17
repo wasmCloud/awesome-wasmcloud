@@ -213,6 +213,12 @@ run_scenario() {
     grep -E 'UNEXPECTED|WRONG|FAIL' "$outfile" | sed 's/^/    /'
     die "$label had failures"
   fi
+  [[ "$ok" == "40" ]] || die "$label did not report all 40 checks"
+  if [[ "$plugin_id" == "couchbase-wasi-sockets-p3" ]]; then
+    local refused
+    refused="$(grep -cE '^(37|38|39|40) .*durability: OK unsupported on this transport$' "$outfile" || true)"
+    [[ "$refused" == "4" ]] || die "$label accepted a durability level it cannot implement"
+  fi
 }
 
 step "Run 1 of 2 — the same workload, over the Data API (HTTPS, via CNG)"

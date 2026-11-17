@@ -194,6 +194,97 @@ fn doc_text(d: &[u8]) -> String {
     String::from_utf8_lossy(d).to_string()
 }
 
+async fn expiry_of(id: &str) -> Result<String, String> {
+    let got = document::get(
+        id.into(),
+        Some(DocumentGetOptions {
+            with_expiry: true,
+            ..get_opts(None)
+        }),
+    )
+    .await
+    .map_err(|e| describe(&e))?;
+    let expiry = got
+        .expires_at
+        .ok_or_else(|| "no expiry returned".to_string())?;
+    Ok(format!("{expiry:?}"))
+}
+
+async fn long_ttl_regression() -> Result<(), String> {
+    let id = "scenario:long-ttl";
+    let ttl = 31 * 24 * 60 * 60 * SECOND_NS;
+    document::upsert(
+        id.into(),
+        br#"{"long_ttl":true}"#.to_vec(),
+        Some(upsert_opts(ttl)),
+    )
+    .await
+    .map_err(|e| describe(&e))?;
+    expiry_of(id).await?;
+    document::touch(
+        id.into(),
+        Some(DocumentTouchOptions {
+            expires_in: ttl,
+            timeout_ns: None,
+            retry_strategy: None,
+            parent_span: None,
+        }),
+    )
+    .await
+    .map_err(|e| describe(&e))?;
+    expiry_of(id).await?;
+    document::get_and_touch(
+        id.into(),
+        Some(DocumentGetAndTouchOptions {
+            expires_in: ttl,
+            timeout_ns: None,
+            retry_strategy: None,
+            parent_span: None,
+        }),
+    )
+    .await
+    .map_err(|e| describe(&e))?;
+    expiry_of(id).await?;
+    Ok(())
+}
+
+async fn query_expiry_regression() -> Result<(), String> {
+    let id = "scenario:query-expiry";
+    document::upsert(
+        id.into(),
+        br#"{"marker":0}"#.to_vec(),
+        Some(upsert_opts(3600 * SECOND_NS)),
+    )
+    .await
+    .map_err(|e| describe(&e))?;
+    let before = expiry_of(id).await?;
+    sqlpp::query(
+        "UPDATE _default USE KEYS $1 SET marker = 1".into(),
+        vec![SqlppValue::Json(format!("\"{id}\""))],
+        Some(SqlppQueryOptions {
+            preserve_expiry: true,
+            ..query_opts(false)
+        }),
+    )
+    .await
+    .map_err(|e| describe_query(&e))?;
+    let after = expiry_of(id).await?;
+    if after != before {
+        return Err(format!("expiry changed from {before} to {after}"));
+    }
+    Ok(())
+}
+
+fn durable_outcome(
+    result: Result<bindings::wasmcloud::couchbase::types::MutationMetadata, DocumentError>,
+) -> String {
+    match result {
+        Ok(_) => "OK durable write accepted".into(),
+        Err(DocumentError::Unsupported(_)) => "OK unsupported on this transport".into(),
+        Err(e) => format!("UNEXPECTED-ERR {}", describe(&e)),
+    }
+}
+
 async fn scenario() -> Vec<String> {
     let mut r = Report(Vec::new());
     let k = "scenario:doc";
@@ -734,6 +825,79 @@ async fn scenario() -> Vec<String> {
             )
         },
         describe,
+    );
+
+    r.ok(
+        "35 long-ttl-survives-write-and-touch",
+        long_ttl_regression().await,
+        |()| "31-day TTL retained".into(),
+        String::clone,
+    );
+    r.ok(
+        "36 query-preserves-expiry",
+        query_expiry_regression().await,
+        |()| "expiry unchanged".into(),
+        String::clone,
+    );
+
+    let durable_id = "scenario:durable";
+    let _ = document::remove(durable_id.into(), None).await;
+    r.push(
+        "37 insert-durability",
+        durable_outcome(
+            document::insert(
+                durable_id.into(),
+                br#"{"marker":1}"#.to_vec(),
+                Some(DocumentInsertOptions {
+                    durability_level: DurabilityLevel::PersistMajority,
+                    ..insert_opts(0)
+                }),
+            )
+            .await,
+        ),
+    );
+    // Seed independently: the preceding insert may have been refused.
+    let _ = document::upsert(durable_id.into(), br#"{"marker":1}"#.to_vec(), None).await;
+    r.push(
+        "38 upsert-durability",
+        durable_outcome(
+            document::upsert(
+                durable_id.into(),
+                br#"{"marker":2}"#.to_vec(),
+                Some(DocumentUpsertOptions {
+                    durability_level: DurabilityLevel::PersistMajority,
+                    ..upsert_opts(0)
+                }),
+            )
+            .await,
+        ),
+    );
+    r.push(
+        "39 replace-durability",
+        durable_outcome(
+            document::replace(
+                durable_id.into(),
+                br#"{"marker":3}"#.to_vec(),
+                Some(DocumentReplaceOptions {
+                    durability_level: DurabilityLevel::PersistMajority,
+                    ..replace_opts(0)
+                }),
+            )
+            .await,
+        ),
+    );
+    r.push(
+        "40 remove-durability",
+        durable_outcome(
+            document::remove(
+                durable_id.into(),
+                Some(DocumentRemoveOptions {
+                    durability_level: DurabilityLevel::PersistMajority,
+                    ..remove_opts(0)
+                }),
+            )
+            .await,
+        ),
     );
 
     r.0

@@ -187,26 +187,10 @@ fn pick_u64(map: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64> 
 /// Returns `None` if any token lacks structure — a partial vector is worse than
 /// none, since it would silently under-constrain the query.
 pub fn scan_vector(tokens: &[Token]) -> Option<Value> {
-    if tokens.is_empty() {
-        return None;
-    }
-    let mut vector = serde_json::Map::new();
-    for token in tokens {
-        let parts = token.parts()?;
-        // A zeroed token is what an implementation reports when it had none;
-        // treating it as a real position would claim a guarantee nobody has.
-        if parts.partition_uuid == 0 {
-            return None;
-        }
-        vector.insert(
-            parts.partition_id.to_string(),
-            Value::Array(vec![
-                Value::from(parts.sequence_number),
-                Value::String(parts.partition_uuid.to_string()),
-            ]),
-        );
-    }
-    Some(Value::Object(vector))
+    let parts = tokens.iter().map(Token::parts).collect::<Option<Vec<_>>>()?;
+    crate::query::scan_vector(parts.into_iter().map(|p| {
+        (p.partition_id, p.partition_uuid, p.sequence_number)
+    }))
 }
 
 #[cfg(test)]
@@ -322,6 +306,12 @@ mod tests {
                 partition_id: 19,
                 partition_uuid: 47574574,
                 sequence_number: 34,
+            }),
+            Token::Structured(Parts {
+                bucket: "b".into(),
+                partition_id: 5,
+                partition_uuid: 5409393,
+                sequence_number: 11,
             }),
         ];
         let vector = scan_vector(&tokens).expect("structured tokens build a vector");

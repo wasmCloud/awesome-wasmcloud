@@ -252,6 +252,8 @@ mod tests {
         // Sub-millisecond rounds up, so a tiny timeout is not silently zero.
         assert_eq!(binding.with_timeout_ns(Some(1)).timeout_ms, 1);
         assert_eq!(binding.with_timeout_ns(Some(1_500_000)).timeout_ms, 2);
+        assert_eq!(binding.with_timeout_ns(Some(4_294_967_296_000_000)).timeout_ms, u32::MAX);
+        assert_eq!(binding.with_timeout_ns(Some(u64::MAX)).timeout_ms, u32::MAX);
     }
 
     #[test]

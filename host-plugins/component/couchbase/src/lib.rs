@@ -16,7 +16,11 @@
 pub mod api;
 pub mod config;
 pub mod mutation;
+pub mod query;
 pub mod timefmt;
+
+#[cfg(any(target_family = "wasm", test))]
+mod workload_bindings;
 
 #[cfg(target_family = "wasm")]
 mod plugin;

@@ -9,13 +9,13 @@ mod bindings {
     wit_bindgen::generate!({ world: "couchbase-plugin", generate_all });
 }
 
-use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
 
 use crate::api::{self, Failure};
 use crate::config::Binding;
 use crate::mutation;
 use crate::timefmt;
+use crate::workload_bindings::WorkloadBindings;
 
 use bindings::exports::wasmcloud::couchbase::document::{
     DocumentGetAllReplicaOptions, DocumentGetAndLockOptions, DocumentGetAndTouchOptions,
@@ -40,7 +40,7 @@ use bindings::wasi::http::types::{
 };
 use bindings::wasmcloud::host::{cancel, identity};
 
-/// Each workload's validated Couchbase binding, keyed by workload id.
+/// Each workload's validated Couchbase bindings, keyed by workload id and label.
 ///
 /// Held only inside synchronous blocks, never across an `.await`, so a plain
 /// `Mutex` is enough even though concurrent capability calls interleave
@@ -49,7 +49,7 @@ use bindings::wasmcloud::host::{cancel, identity};
 /// This resets when the plugin's store restarts. That is safe because the host
 /// replays `on-workload-bind` for every still-bound workload before serving any
 /// queued call — which is also why the bind hook must stay idempotent.
-static BINDINGS: Mutex<BTreeMap<String, Binding>> = Mutex::new(BTreeMap::new());
+static BINDINGS: Mutex<WorkloadBindings> = Mutex::new(WorkloadBindings::new());
 
 struct Component;
 
@@ -67,24 +67,24 @@ impl LifecycleGuest for Component {
     /// why every required key is checked now rather than on the workload's
     /// first call.
     async fn on_workload_bind(workload: WorkloadInfo) -> Result<(), String> {
-        let Some(iface) = workload
+        let mut bound = Vec::new();
+        for iface in workload
             .interfaces
             .iter()
-            .find(|i| i.namespace == "wasmcloud" && i.package == "couchbase")
-        else {
-            return Ok(());
-        };
+            .filter(|i| i.namespace == "wasmcloud" && i.package == "couchbase")
+        {
+            let binding = Binding::from_config(&iface.config).map_err(|reason| {
+                format!(
+                    "workload `{}` in namespace `{}`: wasmcloud:couchbase {reason}",
+                    workload.name, workload.namespace
+                )
+            })?;
+            bound.push((iface.name.clone(), binding));
+        }
 
-        let binding = Binding::from_config(&iface.config).map_err(|reason| {
-            format!(
-                "workload `{}` in namespace `{}`: wasmcloud:couchbase {reason}",
-                workload.name, workload.namespace
-            )
-        })?;
-
-        // Idempotent by construction: a replayed bind overwrites the entry with
-        // an identical one.
-        lock(&BINDINGS).insert(workload.id, binding);
+        // Validate every entry before publishing any, and remove stale labels
+        // if a workload is rebound with a different set of imports.
+        lock(&BINDINGS).replace(workload.id, bound);
         Ok(())
     }
 
@@ -111,11 +111,14 @@ fn caller_binding() -> Result<Binding, DocumentError> {
             "no in-flight caller: wasmcloud:couchbase can only be used from a workload's capability call".to_string(),
         ));
     }
-    lock(&BINDINGS).get(&workload).cloned().ok_or_else(|| {
-        DocumentError::NotConfigured(format!(
-            "workload `{workload}` has no wasmcloud:couchbase binding on this plugin"
-        ))
-    })
+    lock(&BINDINGS)
+        .get(workload.clone(), identity::get_binding_name())
+        .cloned()
+        .ok_or_else(|| {
+            DocumentError::NotConfigured(format!(
+                "workload `{workload}` has no wasmcloud:couchbase binding on this plugin"
+            ))
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -877,7 +880,9 @@ impl SqlppGuest for Component {
         params: Vec<SqlppValue>,
         options: Option<SqlppQueryOptions>,
     ) -> Result<SqlppValue, SqlppQueryError> {
-        let binding = caller_binding().map_err(document_error_as_query_error)?;
+        let binding = caller_binding()
+            .map_err(document_error_as_query_error)?
+            .with_timeout_ns(options.as_ref().map(|o| o.timeout_ns));
 
         let mut request = serde_json::Map::new();
         request.insert("statement".to_string(), query.into());
@@ -945,13 +950,13 @@ impl SqlppGuest for Component {
                 Some(vector) => scan_vector = Some(vector),
                 None => {
                     return Err(SqlppQueryError::InvalidArgument(
-                        "consistent-with needs a mutation token with a non-zero partition-uuid for every entry; a zeroed token means none was available, and a partial scan vector would let the query run without waiting. Use scan-consistency request-plus instead".to_string(),
+                        "consistent-with needs non-zero mutation tokens from one history per partition; use scan-consistency request-plus instead".to_string(),
                     ))
                 }
             }
         }
 
-        let mut timeout_ms = binding.timeout_ms;
+        let timeout_ms = binding.timeout_ms;
         if let Some(options) = options.as_ref() {
             let consistency = match options.scan_consistency {
                 bindings::exports::wasmcloud::couchbase::types::QueryScanConsistency::NotBounded => {
@@ -963,12 +968,10 @@ impl SqlppGuest for Component {
             };
             request.insert("scan_consistency".to_string(), consistency.into());
             request.insert("readonly".to_string(), options.readonly.into());
+            request.insert("preserve_expiry".to_string(), options.preserve_expiry.into());
             request.insert("metrics".to_string(), options.metrics.into());
             if let Some(id) = options.client_context_id.as_ref() {
                 request.insert("client_context_id".to_string(), id.clone().into());
-            }
-            if options.timeout_ns > 0 {
-                timeout_ms = options.timeout_ns.div_ceil(1_000_000).max(1) as u32;
             }
         }
         request.insert("timeout".to_string(), format!("{timeout_ms}ms").into());
@@ -985,12 +988,7 @@ impl SqlppGuest for Component {
         let path = format!("{}/_p/query/query/service", binding.base_path);
         let payload = serde_json::Value::Object(request).to_string().into_bytes();
 
-        // A per-query timeout must also bound the transport, or a query that
-        // outlives it would still hold the caller open.
-        let binding = Binding {
-            timeout_ms,
-            ..binding
-        };
+        // The effective binding timeout bounds both the query and transport.
         let reply = send(
             &binding,
             Method::Post,
