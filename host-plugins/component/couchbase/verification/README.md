@@ -12,13 +12,16 @@ results are summarized in the project [README](../README.md#run-live).
   step that configures it, and the **Cloud Native Gateway** in front of it,
   serving the Data API. One command, no manual setup.
 - `scenario/` — a workload component importing `wasmcloud:couchbase`. One
-  `GET /` runs 34 steps and returns a line per step, so a single request
+  `GET /` runs 40 steps and returns a line per step, so a single request
   exercises the whole capability across the store boundary.
 
 The scenario drives **both** implementations — the Data API plugin here and the
 [wasi:sockets KV plugin](../../couchbase-wasi-sockets-p3/) — because they export
-the same interface, and both score 34/34. Where the transports genuinely
-differ it asserts on coherence rather than on one fixed answer:
+the same interface, and both pass 40/40 against Couchbase Server 8.0.3 with
+`wash:2.12.1-all-features`. Steps 35–40 cover long TTLs, SQL++ expiry preservation,
+and durable writes; the harness requires the sockets plugin to refuse all four
+durable write operations. Where the transports genuinely differ it asserts on
+coherence rather than on one fixed answer:
 `get-and-lock`/`unlock` and `preserve-expiry` either report `unsupported`, or
 work *and* are checked for having actually worked — the lock must refuse a wrong
 CAS and accept its own, and a preserved TTL must still be there on read-back. A

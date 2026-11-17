@@ -12,7 +12,7 @@ The interface is not copied. [`.wash/config.yaml`](.wash/config.yaml) resolves
 `wasmcloud:couchbase` from `../couchbase/interface`, so this plugin and the
 Data API plugin cannot drift.
 
-**Status: working.** 34/34 on the
+**Status: working.** 40/40 on the
 [shared verification scenario](../couchbase/verification/), the same score as
 the Data API plugin, against a real cluster. Also run as a host plugin on a wasmCloud
 2.12.0 cluster in Kubernetes.
@@ -88,6 +88,9 @@ unit test for precisely that, checked against what a live cluster serves.
   balancer; not yet a multi-node client.
 - **No replica reads**, for the same reason.
 - **`preserve-expiry` is refused**, not silently dropped.
+- **Durable KV writes are refused.** `durability-level` values other than
+  `unknown` and `none`, and non-zero `persist-to`/`replicate-to`, return
+  `unsupported`. Use the Data API plugin when a write needs durability.
 - **SASL PLAIN only.** The server also offers SCRAM-SHA1/256/512. PLAIN over an
   untrusted network sends the password in the clear, which is the other reason
   TLS matters here.

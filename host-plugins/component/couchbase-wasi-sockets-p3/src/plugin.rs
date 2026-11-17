@@ -18,6 +18,7 @@ use crate::bindings;
 use crate::conn::Connection;
 use crate::config::Binding;
 use crate::proto::{self, op, status};
+use crate::query;
 
 use bindings::exports::wasmcloud::couchbase::document::{
     DocumentGetAllReplicaOptions, DocumentGetAndLockOptions, DocumentGetAndTouchOptions,
@@ -30,12 +31,12 @@ use bindings::exports::wasmcloud::couchbase::sqlpp::{
 };
 use bindings::exports::wasmcloud::couchbase::sqlpp_types::SqlppQueryError;
 use bindings::exports::wasmcloud::couchbase::types::{
-    DocumentError, MutationMetadata, ReplicaReadLevel, Time,
+    DocumentError, DurabilityLevel, MutationMetadata, ReplicaReadLevel, Time,
 };
 use bindings::exports::wasmcloud::host::workload_lifecycle::{
     Guest as LifecycleGuest, InterfaceBinding, WorkloadInfo,
 };
-use bindings::wasi::clocks::monotonic_clock;
+use bindings::wasi::clocks::{monotonic_clock, system_clock};
 use bindings::wasi::sockets::ip_name_lookup;
 use bindings::wasmcloud::host::{binding_secrets, identity};
 use bindings::wasmcloud::secrets::reveal::reveal;
@@ -292,13 +293,10 @@ fn to_document_error(code: u16, had_cas: bool) -> DocumentError {
     }
 }
 
-/// Couchbase expiries are whole seconds, so a sub-second value rounds up rather
-/// than to zero -- which would mean "no expiry".
-fn expiry_seconds(expires_in_ns: u64) -> u32 {
-    if expires_in_ns == 0 {
-        return 0;
-    }
-    expires_in_ns.div_ceil(1_000_000_000).clamp(1, u64::from(u32::MAX)) as u32
+/// Encode a relative TTL for the KV protocol's mixed relative/absolute field.
+fn expiry_seconds(expires_in_ns: u64) -> Result<u32, DocumentError> {
+    proto::expiry_seconds(expires_in_ns, || system_clock::now().seconds)
+        .map_err(DocumentError::InvalidArgument)
 }
 
 /// Build the mutation metadata a write reports.
@@ -314,12 +312,21 @@ fn mutation(binding: &Binding, vbucket: u16, cas: u64, extras: &[u8]) -> Mutatio
     }
 }
 
-/// Refuse the pre-6.0 durability settings, which this implementation does not
-/// send. Accepting them would promise a durability the write never had.
-fn reject_unhonoured(persist_to: u64, replicate_to: u64) -> Result<(), DocumentError> {
+/// Refuse legacy and synchronous durability, neither of which this transport
+/// sends. Accepting them would promise a durability the write never had.
+fn reject_unhonoured(
+    persist_to: u64,
+    replicate_to: u64,
+    level: DurabilityLevel,
+) -> Result<(), DocumentError> {
     if persist_to != 0 || replicate_to != 0 {
         return Err(DocumentError::Unsupported(
-            "persist-to/replicate-to are the pre-6.0 durability settings; use `durability-level`".to_string(),
+            "persist-to/replicate-to are not implemented on this transport".to_string(),
+        ));
+    }
+    if !matches!(level, DurabilityLevel::Unknown | DurabilityLevel::None) {
+        return Err(DocumentError::Unsupported(
+            "durability-level is not implemented on this transport; use the Data API plugin for durable writes".to_string(),
         ));
     }
     Ok(())
@@ -363,7 +370,7 @@ async fn store(
 ) -> Result<MutationMetadata, DocumentError> {
     let binding = caller_binding()?.with_timeout_ns(timeout_ns);
     let extras =
-        proto::store_extras(flags.unwrap_or(proto::JSON_FLAGS), expiry_seconds(expires_in_ns));
+        proto::store_extras(flags.unwrap_or(proto::JSON_FLAGS), expiry_seconds(expires_in_ns)?);
     let b = binding.clone();
     with_connection(&binding, async move |conn| {
         let vbucket = conn.vbucket_for(&id);
@@ -497,7 +504,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentInsertOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
         if let Some(o) = options.as_ref() {
-            reject_unhonoured(o.persist_to, o.replicate_to)?;
+            reject_unhonoured(o.persist_to, o.replicate_to, o.durability_level)?;
         }
         let (flags, expires) = options.as_ref().map_or((None, 0), |o| (o.flags, o.expires_in_ns));
         store(op::ADD, id, document, flags, expires, 0, options.and_then(|o| o.timeout_ns)).await
@@ -509,7 +516,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentUpsertOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
         if let Some(o) = options.as_ref() {
-            reject_unhonoured(o.persist_to, o.replicate_to)?;
+            reject_unhonoured(o.persist_to, o.replicate_to, o.durability_level)?;
             reject_preserve_expiry(o.preserve_expiry)?;
         }
         let (flags, expires) = options.as_ref().map_or((None, 0), |o| (o.flags, o.expires_in_ns));
@@ -522,7 +529,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentReplaceOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
         if let Some(o) = options.as_ref() {
-            reject_unhonoured(o.persist_to, o.replicate_to)?;
+            reject_unhonoured(o.persist_to, o.replicate_to, o.durability_level)?;
             reject_preserve_expiry(o.preserve_expiry)?;
         }
         let (flags, expires, cas) =
@@ -550,7 +557,7 @@ impl DocumentGuest for Component {
     ) -> Result<MutationMetadata, DocumentError> {
         let binding = caller_binding()?.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
         if let Some(o) = options.as_ref() {
-            reject_unhonoured(o.persist_to, o.replicate_to)?;
+            reject_unhonoured(o.persist_to, o.replicate_to, o.durability_level)?;
         }
         let cas = options.as_ref().map_or(0, |o| o.cas);
         let b = binding.clone();
@@ -574,7 +581,7 @@ impl DocumentGuest for Component {
         options: Option<DocumentTouchOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
         let binding = caller_binding()?.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
-        let seconds = expiry_seconds(options.as_ref().map_or(0, |o| o.expires_in));
+        let seconds = expiry_seconds(options.as_ref().map_or(0, |o| o.expires_in))?;
         if seconds == 0 {
             return Err(DocumentError::InvalidArgument(
                 "touch requires a non-zero expires-in; clear an expiry with `upsert` and expires-in-ns 0".to_string(),
@@ -600,7 +607,7 @@ impl DocumentGuest for Component {
         id: String,
         options: Option<DocumentGetAndTouchOptions>,
     ) -> Result<DocumentGetResult, DocumentError> {
-        let seconds = expiry_seconds(options.as_ref().map_or(0, |o| o.expires_in));
+        let seconds = expiry_seconds(options.as_ref().map_or(0, |o| o.expires_in))?;
         if seconds == 0 {
             return Err(DocumentError::InvalidArgument(
                 "get-and-touch requires a non-zero expires-in".to_string(),
@@ -617,7 +624,9 @@ impl DocumentGuest for Component {
         // `lock-time` is not an option in the WIT, so `0` means "the default".
         let seconds = match options.as_ref().map_or(0, |o| o.lock_time) {
             0 => DEFAULT_LOCK_SECONDS,
-            ns => expiry_seconds(ns),
+            ns => u32::try_from(ns.div_ceil(1_000_000_000)).map_err(|_| {
+                DocumentError::InvalidArgument("lock-time is too large".to_string())
+            })?,
         };
         let timeout_ns = options.and_then(|o| o.timeout_ns);
         read(op::GET_AND_LOCK, id, seconds.to_be_bytes().to_vec(), Vec::new(), false, timeout_ns).await
@@ -781,6 +790,7 @@ impl SqlppGuest for Component {
         if let Some(options) = options.as_ref() {
             use bindings::exports::wasmcloud::couchbase::types::QueryScanConsistency as Wit;
             request.insert("readonly".to_string(), options.readonly.into());
+            request.insert("preserve_expiry".to_string(), options.preserve_expiry.into());
 
             // `consistent-with` implies `at_plus`, matching how the SDKs treat
             // it, so it overrides whatever scan-consistency was also set.
@@ -798,23 +808,14 @@ impl SqlppGuest for Component {
                 // A zeroed partition-uuid is how `mutation-metadata` reports
                 // "no token was available". Sent on, it builds a scan vector the
                 // query service satisfies immediately.
-                if state.tokens.is_empty() || state.tokens.iter().any(|t| t.partition_uuid == 0) {
-                    return Err(SqlppQueryError::InvalidArgument(
-                        "consistent-with needs a mutation token with a non-zero partition-uuid for every entry; a zeroed token means none was available, and a partial scan vector would let the query run without waiting. Use scan-consistency request-plus instead".to_string(),
-                    ));
-                }
-                let mut vector = serde_json::Map::new();
-                for token in &state.tokens {
-                    vector.insert(
-                        token.partition_id.to_string(),
-                        serde_json::Value::Array(vec![
-                            token.sequence_number.into(),
-                            token.partition_uuid.to_string().into(),
-                        ]),
-                    );
-                }
+                let vector = query::scan_vector(state.tokens.iter().map(|token| {
+                    (token.partition_id, token.partition_uuid, token.sequence_number)
+                }))
+                .ok_or_else(|| SqlppQueryError::InvalidArgument(
+                    "consistent-with needs non-zero mutation tokens from one history per partition; use scan-consistency request-plus instead".to_string(),
+                ))?;
                 let mut buckets = serde_json::Map::new();
-                buckets.insert(binding.bucket.clone(), serde_json::Value::Object(vector));
+                buckets.insert(binding.bucket.clone(), vector);
                 request.insert("scan_consistency".to_string(), "at_plus".into());
                 request.insert("scan_vectors".to_string(), serde_json::Value::Object(buckets));
             } else {
