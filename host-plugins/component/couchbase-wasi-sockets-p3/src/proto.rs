@@ -21,6 +21,9 @@ pub const MAGIC_REQUEST: u8 = 0x80;
 pub const MAGIC_RESPONSE: u8 = 0x81;
 /// Every request and response starts with a fixed 24-byte header.
 pub const HEADER_LEN: usize = 24;
+/// Documents are at most 20 MiB; leave room for metadata and cluster config
+/// while refusing peer-controlled allocations near wasm32's address limit.
+pub const MAX_RESPONSE_BODY_LEN: usize = 32 * 1024 * 1024;
 
 /// The opcodes this implementation sends.
 pub mod op {
@@ -118,7 +121,7 @@ impl ResponseHeader {
         if bytes[0] != MAGIC_RESPONSE {
             return Err(format!("not a response: magic 0x{:02x}", bytes[0]));
         }
-        Ok(Self {
+        let header = Self {
             opcode: bytes[1],
             key_len: u16::from_be_bytes([bytes[2], bytes[3]]) as usize,
             extras_len: bytes[4] as usize,
@@ -130,7 +133,14 @@ impl ResponseHeader {
                 bytes[16], bytes[17], bytes[18], bytes[19],
                 bytes[20], bytes[21], bytes[22], bytes[23],
             ]),
-        })
+        };
+        if header.extras_len + header.key_len > header.body_len {
+            return Err("response extras and key exceed its body length".into());
+        }
+        if header.body_len > MAX_RESPONSE_BODY_LEN {
+            return Err("KV response exceeds the 32 MiB response limit".into());
+        }
+        Ok(header)
     }
 
     /// Where the value starts within the body.
@@ -148,22 +158,32 @@ pub fn request(
     value: &[u8],
     opaque: u32,
     cas: u64,
-) -> Vec<u8> {
-    let body_len = extras.len() + key.len() + value.len();
-    let mut out = Vec::with_capacity(HEADER_LEN + body_len);
+) -> Result<Vec<u8>, String> {
+    let key_len = u16::try_from(key.len()).map_err(|_| "KV request key is too long")?;
+    let extras_len = u8::try_from(extras.len()).map_err(|_| "KV request extras are too long")?;
+    let body_len = extras
+        .len()
+        .checked_add(key.len())
+        .and_then(|n| n.checked_add(value.len()))
+        .ok_or("KV request body length overflow")?;
+    let wire_len = u32::try_from(body_len).map_err(|_| "KV request body is too long")?;
+    let capacity = HEADER_LEN
+        .checked_add(body_len)
+        .ok_or("KV request frame length overflow")?;
+    let mut out = Vec::with_capacity(capacity);
     out.push(MAGIC_REQUEST);
     out.push(opcode);
-    out.extend_from_slice(&(key.len() as u16).to_be_bytes());
-    out.push(extras.len() as u8);
+    out.extend_from_slice(&key_len.to_be_bytes());
+    out.push(extras_len);
     out.push(0); // data type: raw. JSON is advertised by the value's flags.
     out.extend_from_slice(&vbucket.to_be_bytes());
-    out.extend_from_slice(&(body_len as u32).to_be_bytes());
+    out.extend_from_slice(&wire_len.to_be_bytes());
     out.extend_from_slice(&opaque.to_be_bytes());
     out.extend_from_slice(&cas.to_be_bytes());
     out.extend_from_slice(extras);
     out.extend_from_slice(key);
     out.extend_from_slice(value);
-    out
+    Ok(out)
 }
 
 /// Encode an unsigned integer as leb128, the collection-id prefix format.
@@ -181,10 +201,14 @@ pub fn leb128(mut value: u32) -> Vec<u8> {
 }
 
 /// The wire key: collection id, then the document id.
-pub fn encode_key(collection_id: u32, key: &str) -> Vec<u8> {
+pub fn encode_key(collection_id: u32, key: &str) -> Result<Vec<u8>, String> {
+    let limit = if collection_id == 0 { 250 } else { 246 };
+    if key.is_empty() || key.len() > limit {
+        return Err(format!("document id must be between 1 and {limit} bytes"));
+    }
     let mut out = leb128(collection_id);
     out.extend_from_slice(key.as_bytes());
-    out
+    Ok(out)
 }
 
 /// CRC32 as Couchbase computes it for vbucket routing.
@@ -360,6 +384,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn invalid_document_ids_cannot_wrap_the_wire_key_length() {
+        assert!(encode_key(0, "").is_err());
+        assert!(encode_key(0, &"x".repeat(65_537)).is_err());
+        assert!(encode_key(0, &"x".repeat(250)).is_ok());
+        assert!(encode_key(1, &"x".repeat(247)).is_err());
+        assert!(encode_key(1, &"x".repeat(246)).is_ok());
+        assert!(encode_key(0, &"字".repeat(84)).is_err());
+        assert!(encode_key(0, &"字".repeat(83)).is_ok());
+        assert!(request(op::GET, 0, &vec![0; 65_536], &[], &[], 1, 0).is_err());
+        assert!(request(op::GET, 0, b"key", &vec![0; 256], &[], 1, 0).is_err());
+    }
+
+    #[test]
+    fn malformed_and_unbounded_response_lengths_are_refused_before_reading() {
+        let mut header = [0; HEADER_LEN];
+        header[0] = MAGIC_RESPONSE;
+        header[4] = 20;
+        assert!(ResponseHeader::parse(&header).is_err());
+        header[4] = 0;
+        header[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(ResponseHeader::parse(&header).is_err());
+        header[8..12].copy_from_slice(&(20 * 1024 * 1024u32).to_be_bytes());
+        assert!(ResponseHeader::parse(&header).is_ok());
+    }
+
+    #[test]
     fn ttl_boundary_preserves_relative_and_absolute_expiries() {
         const SECOND: u64 = 1_000_000_000;
         const MONTH: u64 = 30 * 24 * 60 * 60;
@@ -390,7 +440,7 @@ mod tests {
 
     #[test]
     fn a_request_frame_has_the_documented_layout() {
-        let frame = request(op::GET, 0x0364, b"key", b"", b"", 7, 0);
+        let frame = request(op::GET, 0x0364, b"key", b"", b"", 7, 0).unwrap();
         assert_eq!(frame[0], MAGIC_REQUEST);
         assert_eq!(frame[1], op::GET);
         assert_eq!(&frame[2..4], &3u16.to_be_bytes()); // key length
@@ -439,8 +489,8 @@ mod tests {
 
     #[test]
     fn the_wire_key_carries_the_collection_prefix() {
-        assert_eq!(encode_key(0, "doc"), b"\x00doc".to_vec());
-        assert_eq!(encode_key(300, "doc"), b"\xac\x02doc".to_vec());
+        assert_eq!(encode_key(0, "doc").unwrap(), b"\x00doc".to_vec());
+        assert_eq!(encode_key(300, "doc").unwrap(), b"\xac\x02doc".to_vec());
     }
 
     #[test]

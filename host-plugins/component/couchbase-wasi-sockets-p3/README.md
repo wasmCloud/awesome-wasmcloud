@@ -84,8 +84,8 @@ unit test for precisely that, checked against what a live cluster serves.
   WIT is not in a registry and would need vendoring.
 - **One node.** The cluster map is read for its vbucket count, not its topology:
   there is no per-node connection and no rebalance following. A `not-my-vbucket`
-  is reported rather than retried elsewhere. Fine for a single node or behind a
-  balancer; not yet a multi-node client.
+  is reported rather than retried elsewhere. Use a single-node cluster; a generic
+  TCP load balancer does not supply vbucket routing.
 - **No replica reads**, for the same reason.
 - **`preserve-expiry` is refused**, not silently dropped.
 - **Projections support dot-separated object fields.** Array indexes and escaped
@@ -99,6 +99,16 @@ unit test for precisely that, checked against what a live cluster serves.
 
 Each of these returns `unsupported` with a message naming the reason, rather
 than a wrong answer.
+
+Expiry reads compare the document and metadata CAS values and retry both reads
+when they disagree. The call deadline also bounds a continuously changing
+document; metadata failures are surfaced rather than reported as no expiry.
+Keys are checked in bytes before encoding (250 bytes in the default collection,
+246 in named collections). Malformed reply lengths, unexpected opcodes, and
+responses over 32 MiB fail before an unbounded allocation or slice. Couchbase
+[document values are limited to 20 MiB](https://docs.couchbase.com/server/current/learn/data/data.html).
+The [protocol suite](../../../tests/README.md) exercises these failure paths
+without a database account.
 
 ## Configuration
 
@@ -155,7 +165,7 @@ wash build
 ```
 
 Host component plugins are opt-in: the host must be built with the
-`host-component-plugins` feature, which released builds do not carry.
+`host-component-plugins` feature. The released `-all-features` images carry it.
 
 ## License
 

@@ -1,0 +1,6 @@
+package example:component-fault-probe@0.1.0;
+world component-fault-probe {
+    import wasmcloud:couchbase/document@0.2.0;
+    import wasmcloud:couchbase/sqlpp@0.2.0;
+    export wasi:http/handler@0.3.0;
+}

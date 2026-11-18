@@ -1,0 +1,14 @@
+[package]
+name = "component-fault-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+name = "component_fault_probe"
+
+[dependencies]
+wit-bindgen = { version = "0.63.0", features = ["async-spawn", "inter-task-wakeup"] }
+
+[workspace]

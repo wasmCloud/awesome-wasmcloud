@@ -80,8 +80,8 @@ curl --cacert tls/ca.crt -u appuser:apppass123 -H 'content-type: application/jso
   -d '{"statement":"SELECT 1"}' "https://$LAN:18008/_p/query/query/service"
 ```
 
-**2. A host with the feature.** Component host plugins are opt-in and absent
-from released `wash` builds:
+**2. A host with the feature.** Component host plugins are opt-in. Use the
+released `ghcr.io/wasmcloud/wash:2.12.1-all-features` image, or build a host:
 
 ```console
 git clone https://github.com/wasmCloud/wasmCloud && cd wasmCloud

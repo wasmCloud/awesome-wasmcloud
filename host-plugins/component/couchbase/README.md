@@ -12,7 +12,7 @@ protocol.
 > **Status: experimental, but exercised end to end.** It has been run in a real
 > wasmCloud host against live Capella, and — reproducibly, with no cloud account
 > — against a self-hosted cluster fronted by Couchbase's **Cloud Native
-> Gateway**, which is what serves the Data API. 34 scenario steps cover every
+> Gateway**, which is what serves the Data API. 40 scenario steps cover every
 > servable operation, including CAS conflicts, TTLs, binary documents and
 > parameterized SQL++. See [What is and is not verified](#what-is-and-is-not-verified).
 
@@ -62,8 +62,8 @@ note at the point it occurs in [`interface/couchbase.wit`](interface/couchbase.w
 - **Rust** with the `wasm32-wasip2` target (`rustup target add wasm32-wasip2`).
 - **`wash`** 2.12.0 or newer, for the `wasmcloud:host@0.1.6` WIT.
 - **A wasmCloud host built with the `host-component-plugins` Cargo feature.**
-  This is opt-in and is *not* in the released `ghcr.io/wasmcloud/wash` images or
-  the `:canary` tag. Build one with
+  Standard images omit this opt-in feature. Use
+  `ghcr.io/wasmcloud/wash:2.12.1-all-features`, or build one with
   `cargo build --bin wash --features host-component-plugins`. A host without the
   feature rejects a plugin declaration at startup with a clear error rather than
   silently dropping it.

@@ -361,7 +361,7 @@ async fn store(
     let b = binding.clone();
     with_connection(&binding, async move |conn| {
         let vbucket = conn.vbucket_for(&id);
-        let key = conn.wire_key(&id);
+        let key = conn.wire_key(&id).map_err(DocumentError::InvalidArgument)?;
         let reply = conn
             .call(opcode, vbucket, &key, &extras, &document, cas)
             .await
@@ -408,29 +408,34 @@ async fn read(
     let binding = caller_binding()?.with_timeout_ns(timeout_ns);
     with_connection(&binding, async move |conn| {
         let vbucket = conn.vbucket_for(&id);
-        let key = conn.wire_key(&id);
-        let reply = conn
-            .call(opcode, vbucket, &key, &extras, &[], 0)
-            .await
-            .map_err(DocumentError::RequestFailed)?;
-        if !reply.ok() {
-            return Err(to_document_error(reply.header.status, false));
-        }
-        // Projection happens here rather than through a subdoc lookup: the
-        // answer is the same and it is one round trip either way.
-        let document = if paths.is_empty() {
-            reply.value
-        } else {
-            project(&reply.value, &paths)?
-        };
-        // A GET does not report the expiry, so `with-expiry` costs a second
-        // round trip. It is only paid when asked for.
-        let expires_at = if with_expiry {
-            let meta = conn
-                .call(op::GET_META, vbucket, &key, &[], &[], 0)
+        let key = conn.wire_key(&id).map_err(DocumentError::InvalidArgument)?;
+        loop {
+            let reply = conn
+                .call(opcode, vbucket, &key, &extras, &[], 0)
                 .await
                 .map_err(DocumentError::RequestFailed)?;
-            if meta.ok() {
+            if !reply.ok() {
+                return Err(to_document_error(reply.header.status, false));
+            }
+            let expires_at = if with_expiry {
+                let meta = conn
+                    .call(op::GET_META, vbucket, &key, &[], &[], 0)
+                    .await
+                    .map_err(DocumentError::RequestFailed)?;
+                if !meta.ok() {
+                    return Err(to_document_error(meta.header.status, false));
+                }
+                if meta.extras.len() < 12 {
+                    return Err(DocumentError::RequestFailed(
+                        "GET_META returned incomplete expiry metadata".into(),
+                    ));
+                }
+                // A writer may replace the document between GET and GET_META.
+                // Retry both reads rather than mixing two revisions. The outer
+                // deadline also bounds a document that changes continuously.
+                if meta.header.cas != reply.header.cas {
+                    continue;
+                }
                 proto::parse_meta_expiry(&meta.extras).map(|seconds| {
                     let civil = proto::civil_from_unix(i64::from(seconds));
                     Time {
@@ -447,18 +452,20 @@ async fn read(
                 })
             } else {
                 None
-            }
-        } else {
-            None
-        };
-
-        Ok(DocumentGetResult {
-            document,
-            flags: flags_of(&reply.extras),
-            cas: reply.header.cas,
-            expires_in_ns: None,
-            expires_at,
-        })
+            };
+            let document = if paths.is_empty() {
+                reply.value
+            } else {
+                project(&reply.value, &paths)?
+            };
+            return Ok(DocumentGetResult {
+                document,
+                flags: flags_of(&reply.extras),
+                cas: reply.header.cas,
+                expires_in_ns: None,
+                expires_at,
+            });
+        }
     })
     .await
 }
@@ -529,7 +536,7 @@ impl DocumentGuest for Component {
         let b = binding.clone();
         with_connection(&binding, async move |conn| {
             let vbucket = conn.vbucket_for(&id);
-            let key = conn.wire_key(&id);
+            let key = conn.wire_key(&id).map_err(DocumentError::InvalidArgument)?;
             let reply = conn
                 .call(op::DELETE, vbucket, &key, &[], &[], cas)
                 .await
@@ -556,7 +563,7 @@ impl DocumentGuest for Component {
         let b = binding.clone();
         with_connection(&binding, async move |conn| {
             let vbucket = conn.vbucket_for(&id);
-            let key = conn.wire_key(&id);
+            let key = conn.wire_key(&id).map_err(DocumentError::InvalidArgument)?;
             let reply = conn
                 .call(op::TOUCH, vbucket, &key, &seconds.to_be_bytes(), &[], 0)
                 .await
@@ -611,7 +618,7 @@ impl DocumentGuest for Component {
         }
         with_connection(&binding, async move |conn| {
             let vbucket = conn.vbucket_for(&id);
-            let key = conn.wire_key(&id);
+            let key = conn.wire_key(&id).map_err(DocumentError::InvalidArgument)?;
             let reply = conn
                 .call(op::UNLOCK, vbucket, &key, &[], &[], cas)
                 .await
