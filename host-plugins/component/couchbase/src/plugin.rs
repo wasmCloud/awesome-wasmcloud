@@ -15,6 +15,7 @@ use crate::api::{self, Failure};
 use crate::config::Binding;
 use crate::mutation;
 use crate::timefmt;
+use crate::transport;
 use crate::workload_bindings::WorkloadBindings;
 
 use bindings::exports::wasmcloud::couchbase::document::{
@@ -33,7 +34,7 @@ use bindings::exports::wasmcloud::couchbase::types::{
 use bindings::exports::wasmcloud::host::workload_lifecycle::{
     Guest as LifecycleGuest, WorkloadInfo,
 };
-use bindings::wasi::clocks::system_clock;
+use bindings::wasi::clocks::{monotonic_clock, system_clock};
 use bindings::wasi::http::client;
 use bindings::wasi::http::types::{
     ErrorCode, Fields, Method, Request, RequestOptions, Response, Scheme,
@@ -233,6 +234,22 @@ async fn send(
     extra_headers: &[(&str, String)],
     body: Option<Vec<u8>>,
 ) -> Result<Reply, DocumentError> {
+    let timeout_ns = u64::from(binding.timeout_ms) * 1_000_000;
+    transport::within(
+        send_inner(binding, method, path, extra_headers, body),
+        monotonic_clock::wait_for(timeout_ns),
+    )
+    .await
+    .unwrap_or(Err(DocumentError::Timeout))
+}
+
+async fn send_inner(
+    binding: &Binding,
+    method: Method,
+    path: &str,
+    extra_headers: &[(&str, String)],
+    body: Option<Vec<u8>>,
+) -> Result<Reply, DocumentError> {
     // Cancellation is checked before committing to a round-trip. A capability
     // call has no host-imposed timeout, so a teardown arriving while calls are
     // queued returns them immediately rather than waiting out the cluster.
@@ -313,9 +330,15 @@ async fn send(
     let headers = response.get_headers().copy_all();
 
     let (res_tx, res_rx) = bindings::wit_future::new(|| Ok(()));
-    let (body_stream, _trailers) = Response::consume_body(response, res_rx);
-    let body = body_stream.collect().await;
-    drop(res_tx);
+    let (body_stream, trailers) = Response::consume_body(response, res_rx);
+    let body = transport::receive_body(
+        async move {
+            let body = body_stream.collect().await;
+            drop(res_tx);
+            body
+        },
+        trailers,
+    ).await.map_err(transport_error)?;
 
     Ok(Reply {
         status,

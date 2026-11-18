@@ -8,9 +8,13 @@
 //! are the bindings glue and compile only for wasm.
 
 pub mod proto;
+pub mod projection;
 
 #[path = "../../couchbase/src/query.rs"]
 pub mod query;
+
+#[path = "../../couchbase/src/transport.rs"]
+pub mod transport;
 
 #[cfg(target_family = "wasm")]
 mod bindings {

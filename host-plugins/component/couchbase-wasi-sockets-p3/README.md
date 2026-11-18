@@ -88,6 +88,8 @@ unit test for precisely that, checked against what a live cluster serves.
   balancer; not yet a multi-node client.
 - **No replica reads**, for the same reason.
 - **`preserve-expiry` is refused**, not silently dropped.
+- **Projections support dot-separated object fields.** Array indexes and escaped
+  field names return `unsupported`; they are never silently omitted.
 - **Durable KV writes are refused.** `durability-level` values other than
   `unknown` and `none`, and non-zero `persist-to`/`replicate-to`, return
   `unsupported`. Use the Data API plugin when a write needs durability.

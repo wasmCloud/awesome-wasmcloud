@@ -23,6 +23,8 @@ world couchbase-plugin {
     /// Wall clock, used to turn the relative `expiry-seconds` of a `touch`
     /// into the absolute ISO 8601 instant the Data API's touch endpoint wants.
     import wasi:clocks/system-clock@0.3.0;
+    /// One deadline bounds the entire HTTP round-trip, including its body.
+    import wasi:clocks/monotonic-clock@0.3.0;
 
     /// Who is calling. Every capability call resolves the caller's workload id
     /// through this to find that workload's own cluster binding, so two

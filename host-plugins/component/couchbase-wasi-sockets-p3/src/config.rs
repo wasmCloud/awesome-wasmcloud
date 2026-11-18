@@ -16,6 +16,19 @@ const DEFAULT_QUERY_PORT: u16 = 8093;
 /// How long a call may run before it is given up on.
 const DEFAULT_TIMEOUT_MS: u32 = 30_000;
 
+/// A connection's authentication and keyspace identity, without ambiguous
+/// separators between user-controlled strings.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ConnectionKey {
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    bucket: String,
+    scope: String,
+    collection: String,
+}
+
 /// A validated binding for one workload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding {
@@ -64,6 +77,15 @@ impl Binding {
         let require = |key: &str| -> Result<&str, String> {
             get(key).ok_or_else(|| format!("missing required config key `{key}`"))
         };
+        // Credentials are opaque: trimming them changes the identity sent to
+        // the server, including passwords supplied by a secret provider.
+        let credential = |key: &str| -> Result<&str, String> {
+            config.iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, value)| value.as_str())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| format!("missing required config key `{key}`"))
+        };
 
         let (host, port) = parse_endpoint(require("endpoint")?)?;
 
@@ -88,8 +110,8 @@ impl Binding {
             host,
             port,
             query_port,
-            username: require("username")?.to_string(),
-            password: require("password")?.to_string(),
+            username: credential("username")?.to_string(),
+            password: credential("password")?.to_string(),
             bucket: require("bucket")?.to_string(),
             scope: get("scope").unwrap_or(DEFAULT_NAME).to_string(),
             collection: get("collection").unwrap_or(DEFAULT_NAME).to_string(),
@@ -103,11 +125,24 @@ impl Binding {
     /// The password is part of it: a connection is authenticated once, so
     /// without it a binding holding the wrong password would be handed another's
     /// connection and never be told.
-    pub fn connection_key(&self) -> String {
-        format!(
-            "{}:{}|{}|{}|{}|{}.{}",
-            self.host, self.port, self.username, self.password, self.bucket, self.scope, self.collection
-        )
+    pub fn connection_key(&self) -> ConnectionKey {
+        ConnectionKey {
+            host: self.host.clone(),
+            port: self.port,
+            username: self.username.clone(),
+            password: self.password.clone(),
+            bucket: self.bucket.clone(),
+            scope: self.scope.clone(),
+            collection: self.collection.clone(),
+        }
+    }
+
+    pub fn query_authority(&self) -> String {
+        if self.host.parse::<std::net::Ipv6Addr>().is_ok() {
+            format!("[{}]:{}", self.host, self.query_port)
+        } else {
+            format!("{}:{}", self.host, self.query_port)
+        }
     }
 }
 
@@ -142,10 +177,29 @@ fn parse_endpoint(raw: &str) -> Result<(String, u16), String> {
     if rest.is_empty() {
         return Err("config key `endpoint` has no host".to_string());
     }
-    // Only the last colon separates a port, so an IPv6 literal in brackets
-    // keeps its own.
+    if let Some(bracketed) = rest.strip_prefix('[') {
+        let (host, suffix) = bracketed
+            .split_once(']')
+            .ok_or("config key `endpoint` has an unclosed IPv6 address")?;
+        let address = host
+            .parse::<std::net::Ipv6Addr>()
+            .map_err(|_| format!("config key `endpoint` has an invalid IPv6 address: `{host}`"))?;
+        let port = if suffix.is_empty() {
+            DEFAULT_KV_PORT
+        } else {
+            let raw = suffix
+                .strip_prefix(':')
+                .ok_or("config key `endpoint` has unexpected text after its IPv6 address")?;
+            raw.parse::<u16>()
+                .map_err(|_| format!("config key `endpoint` has an invalid port: `{raw}`"))?
+        };
+        return Ok((address.to_string(), port));
+    }
+    if rest.matches(':').count() > 1 {
+        return Err("config key `endpoint` must enclose an IPv6 address in brackets".to_string());
+    }
     match rest.rsplit_once(':') {
-        Some((host, port)) if !host.is_empty() && !host.ends_with(']') => {
+        Some((host, port)) if !host.is_empty() => {
             let port = port
                 .parse::<u16>()
                 .map_err(|_| format!("config key `endpoint` has an invalid port: `{port}`"))?;
@@ -158,6 +212,50 @@ fn parse_endpoint(raw: &str) -> Result<(String, u16), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delimiters_in_credentials_do_not_alias_another_identity() {
+        let mut first = Binding::from_config(&minimal()).unwrap();
+        first.username = "app|extra".into();
+        first.password = "secret".into();
+        let second = Binding {
+            username: "app".into(),
+            password: "extra|secret".into(),
+            ..first.clone()
+        };
+        assert_ne!(first.connection_key(), second.connection_key());
+    }
+
+    #[test]
+    fn secret_values_retain_every_password_byte() {
+        for password in [" secret ", "  a pass phrase  ", "      "] {
+            let mut pairs = minimal();
+            pairs.retain(|(key, _)| key != "password");
+            pairs.push(("password".into(), password.into()));
+            assert_eq!(Binding::from_config(&pairs).unwrap().password, password);
+        }
+    }
+
+    #[test]
+    fn ipv6_hosts_and_ports_are_separated_and_http_authorities_are_bracketed() {
+        for (endpoint, host, port) in [
+            ("couchbase://[::1]", "::1", 11210),
+            ("couchbase://[2001:db8::1]:12000", "2001:db8::1", 12000),
+        ] {
+            assert_eq!(parse_endpoint(endpoint).unwrap(), (host.into(), port));
+            let mut binding = Binding::from_config(&minimal()).unwrap();
+            binding.host = host.into();
+            assert_eq!(binding.query_authority(), format!("[{host}]:8093"));
+        }
+        for invalid in [
+            "couchbase://[::1",
+            "couchbase://[bad]:123",
+            "couchbase://[::1]extra",
+            "couchbase://2001:db8::1",
+        ] {
+            assert!(parse_endpoint(invalid).is_err(), "{invalid}");
+        }
+    }
 
     fn config(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs

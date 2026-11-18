@@ -185,12 +185,16 @@ pub async fn unary(call: Call<'_>) -> Result<Reply, String> {
     let (body_stream, trailers) = Response::consume_body(response, res_rx);
     let received = body_stream.collect().await;
     drop(res_tx);
+    // This future also carries body transport failures, even when a
+    // trailers-only gRPC status was already present in the response headers.
+    let trailing = trailers.await
+        .map_err(|e| format!("response body error: {e:?}"))?;
 
     let (mut status, mut message) = read_status(&headers);
     if status.is_none() {
         // No status in the headers, so this response has a body and the status
         // is in the trailers that follow it.
-        if let Ok(Some(trailing)) = trailers.await {
+        if let Some(trailing) = trailing {
             let (s, m) = read_status(&trailing.copy_all());
             status = s;
             message = message.or(m);

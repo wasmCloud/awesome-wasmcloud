@@ -76,10 +76,17 @@ impl Binding {
         let require = |key: &str| -> Result<&str, String> {
             get(key).ok_or_else(|| format!("missing required config key `{key}`"))
         };
+        let credential = |key: &str| -> Result<&str, String> {
+            config.iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, value)| value.as_str())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| format!("missing required config key `{key}`"))
+        };
 
         let (secure, authority, base_path) = parse_endpoint(require("endpoint")?)?;
-        let username = require("username")?;
-        let password = require("password")?;
+        let username = credential("username")?;
+        let password = credential("password")?;
 
         let timeout_ms = match get("timeout-ms") {
             Some(raw) => raw
@@ -146,6 +153,21 @@ fn parse_endpoint(raw: &str) -> Result<(bool, String, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authorization_preserves_the_exact_password_from_config_or_secrets() {
+        for password in [" secret ", "  a pass phrase  ", "      "] {
+            let mut pairs = minimal();
+            pairs.retain(|(key, _)| key != "password");
+            pairs.push(("password".into(), password.into()));
+            let binding = Binding::from_config(&pairs).unwrap();
+            let encoded = binding.authorization.strip_prefix("Basic ").unwrap();
+            let credentials = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap();
+            assert_eq!(credentials, format!("app:{password}").as_bytes());
+        }
+    }
 
     fn config(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs

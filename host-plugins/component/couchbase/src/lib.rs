@@ -18,6 +18,7 @@ pub mod config;
 pub mod mutation;
 pub mod query;
 pub mod timefmt;
+pub mod transport;
 
 #[cfg(any(target_family = "wasm", test))]
 mod workload_bindings;
