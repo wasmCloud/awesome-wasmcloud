@@ -24,7 +24,8 @@
 //! Nothing here knows about protobuf. Encode a message with `prost` (or by
 //! hand) and hand the bytes over; decode what comes back the same way.
 
-use crate::bindings;
+use crate::{bindings, deadline, protocol};
+use bindings::wasi::clocks::monotonic_clock;
 use bindings::wasi::http::client;
 use bindings::wasi::http::types::{Fields, Method, Request, RequestOptions, Response, Scheme};
 
@@ -41,7 +42,7 @@ pub struct Call<'a> {
     pub message: Vec<u8>,
     /// Extra headers, typically `authorization`.
     pub headers: Vec<(String, Vec<u8>)>,
-    /// Per-call deadline applied to connect, first byte and between bytes.
+    /// Overall RPC deadline, also applied to transport inactivity and sent to the server.
     pub timeout_ns: Option<u64>,
 }
 
@@ -67,57 +68,21 @@ impl Reply {
     }
 }
 
-/// Wrap a message in gRPC's five-byte frame header.
-fn frame(message: &[u8]) -> Vec<u8> {
-    let mut framed = Vec::with_capacity(5 + message.len());
-    framed.push(0); // not compressed
-    framed.extend_from_slice(&(message.len() as u32).to_be_bytes());
-    framed.extend_from_slice(message);
-    framed
-}
-
-/// Split a response body into its messages.
-///
-/// A short or truncated trailing frame is dropped rather than guessed at: a
-/// partial protobuf message decodes into plausible nonsense.
-pub fn split_frames(body: &[u8]) -> Vec<Vec<u8>> {
-    let mut frames = Vec::new();
-    let mut pos = 0;
-    while pos + 5 <= body.len() {
-        // Byte 0 is the compression flag. Nothing here negotiates compression
-        // (no `grpc-accept-encoding` is sent), so a server setting it would be
-        // violating the negotiation; the frame is skipped rather than handed
-        // back as if it were readable.
-        let compressed = body[pos] != 0;
-        let len = u32::from_be_bytes([body[pos + 1], body[pos + 2], body[pos + 3], body[pos + 4]])
-            as usize;
-        pos += 5;
-        let Some(message) = body.get(pos..pos + len) else {
-            break;
-        };
-        if !compressed {
-            frames.push(message.to_vec());
-        }
-        pos += len;
-    }
-    frames
-}
-
-/// Read `grpc-status` and `grpc-message` out of a field set.
-fn read_status(fields: &[(String, Vec<u8>)]) -> (Option<u32>, Option<String>) {
-    let get = |name: &str| -> Option<String> {
-        fields
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .and_then(|(_, v)| String::from_utf8(v.clone()).ok())
-    };
-    let status = get("grpc-status").and_then(|v| v.trim().parse::<u32>().ok());
-    (status, get("grpc-message"))
-}
+pub use protocol::split_frames;
 
 /// Send one unary gRPC call.
 pub async fn unary(call: Call<'_>) -> Result<Reply, String> {
-    let body = frame(&call.message);
+    match call.timeout_ns {
+        Some(0) => Err("gRPC deadline exceeded".into()),
+        Some(ns) => deadline::within(unary_inner(call), monotonic_clock::wait_for(ns))
+            .await
+            .unwrap_or_else(|| Err("gRPC deadline exceeded".into())),
+        None => unary_inner(call).await,
+    }
+}
+
+async fn unary_inner(call: Call<'_>) -> Result<Reply, String> {
+    let body = protocol::frame(&call.message)?;
 
     let fields = Fields::new();
     let set = |name: &str, value: &[u8]| -> Result<(), String> {
@@ -133,6 +98,9 @@ pub async fn unary(call: Call<'_>) -> Result<Reply, String> {
     // request goes out chunked. Some proxies handle a chunked gRPC request
     // poorly.
     set("content-length", body.len().to_string().as_bytes())?;
+    if let Some(ns) = call.timeout_ns {
+        set("grpc-timeout", protocol::timeout_header(ns).as_bytes())?;
+    }
     for (name, value) in &call.headers {
         set(name, value)?;
     }
@@ -187,24 +155,17 @@ pub async fn unary(call: Call<'_>) -> Result<Reply, String> {
     drop(res_tx);
     // This future also carries body transport failures, even when a
     // trailers-only gRPC status was already present in the response headers.
-    let trailing = trailers.await
+    let trailing = trailers
+        .await
         .map_err(|e| format!("response body error: {e:?}"))?;
 
-    let (mut status, mut message) = read_status(&headers);
-    if status.is_none() {
-        // No status in the headers, so this response has a body and the status
-        // is in the trailers that follow it.
-        if let Some(trailing) = trailing {
-            let (s, m) = read_status(&trailing.copy_all());
-            status = s;
-            message = message.or(m);
-        }
-    }
-
+    let trailers = trailing.map(|fields| fields.copy_all()).unwrap_or_default();
+    let (status, message) =
+        protocol::response_status(http_status, &headers, &trailers, !received.is_empty())?;
     Ok(Reply {
         http_status,
-        status,
-        message: message.unwrap_or_default(),
-        frames: split_frames(&received),
+        status: Some(status),
+        message,
+        frames: split_frames(&received)?,
     })
 }

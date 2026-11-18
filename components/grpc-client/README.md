@@ -6,8 +6,9 @@ configured endpoint.
 
 gRPC is HTTP/2 with three conventions on top, so a component needs no transport
 beyond the `wasi:http/client@0.3.0` it already has. The conventions are the
-work, and [`src/grpc.rs`](src/grpc.rs) is the part worth copying: it knows
-nothing about this component, or about protobuf.
+work, and [`src/grpc.rs`](src/grpc.rs), [`src/protocol.rs`](src/protocol.rs), and
+[`src/deadline.rs`](src/deadline.rs) form the reusable transport. They know
+nothing about this HTTP frontend, or about protobuf.
 
 ## The part that is easy to get wrong
 
@@ -31,14 +32,14 @@ POST /<package>.<Service>/<Method>
      Authorization: forwarded to the service if present
 
 200  body: the response message, unframed protobuf
-     grpc-status:      the RPC's status code; 0 is success, `unknown` if the
-                       server sent none
+     grpc-status:      the validated RPC status code; 0 is success
      grpc-message:     the failure reason, absent on success
      grpc-frames:      how many messages came back; >1 for server streaming
      grpc-http-status: the transport's status, 200 even for a failed RPC
 400  the path is not a gRPC method path
+405  method is not POST; Allow: POST
 500  GRPC_AUTHORITY is not set
-502  the call never reached the service
+502  transport/deadline failure, malformed gRPC response, or unsupported compression
 ```
 
 The body is the first frame. A server-streaming call reports its count in
@@ -53,13 +54,25 @@ for a message this small. Nothing here depends on a protobuf crate.
 |---|---|---|---|
 | `GRPC_AUTHORITY` | yes | — | The endpoint, as `host:port` |
 | `GRPC_PLAINTEXT` | no | unset | `1` for `http://`. Plaintext is opt-in so a missing variable cannot silently downgrade TLS |
-| `GRPC_TIMEOUT_MS` | no | `30000` | Per-call deadline |
+| `GRPC_TIMEOUT_MS` | no | `30000` | Positive integer; overall outgoing RPC deadline, including its response body. Also sent as `grpc-timeout` |
 
 The endpoint also has to be in the workload's `allowedHosts`.
 
+Only POST invokes the backend. Incomplete incoming bodies are rejected before
+dispatch. Response framing, HTTP status, content type, and the final gRPC status
+are validated; malformed responses cannot become successful empty messages.
+The transport is uncompressed and buffers response messages. Client and
+bidirectional streaming are not implemented.
+
+`cargo test --locked` runs the protocol and deadline tests without generating
+WIT bindings on the native host. The repository's
+[protocol verification suite](../../tests/README.md) also covers plaintext and
+TLS, service errors, malformed peers, deadlines, method rejection, authorization
+forwarding and certificate validation.
+
 ## Building
 
-Tested with `wash` 2.9.0 and Rust 1.94, targeting `wasm32-wasip2`.
+Verified with the `wash:2.12.1-all-features` host, targeting `wasm32-wasip2`.
 
 ```console
 wash build

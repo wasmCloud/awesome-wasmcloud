@@ -164,7 +164,7 @@ impl Connection {
     ) -> Result<Reply, String> {
         self.opaque = self.opaque.wrapping_add(1);
         let opaque = self.opaque;
-        let frame = proto::request(opcode, vbucket, key, extras, value, opaque, cas);
+        let frame = proto::request(opcode, vbucket, key, extras, value, opaque, cas)?;
 
         let rejected = self.writer.write_all(frame).await;
         if !rejected.is_empty() {
@@ -173,6 +173,9 @@ impl Connection {
 
         let head = self.read_exactly(proto::HEADER_LEN).await?;
         let header = ResponseHeader::parse(&head)?;
+        if header.opcode != opcode {
+            return Err(format!("response opcode 0x{:02x} does not match 0x{opcode:02x}", header.opcode));
+        }
         let body = self.read_exactly(header.body_len).await?;
 
         // A mismatch means the stream has desynchronized; continuing would
@@ -214,7 +217,7 @@ impl Connection {
     }
 
     /// The wire form of a document id for this connection's collection.
-    pub fn wire_key(&self, key: &str) -> Vec<u8> {
+    pub fn wire_key(&self, key: &str) -> Result<Vec<u8>, String> {
         proto::encode_key(self.collection_id, key)
     }
 }

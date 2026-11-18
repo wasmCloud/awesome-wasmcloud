@@ -8,6 +8,8 @@ world grpc-client {
     /// Where the gRPC endpoint is: `GRPC_AUTHORITY`, `GRPC_PLAINTEXT`,
     /// `GRPC_TIMEOUT_MS`.
     import wasi:cli/environment@0.3.0;
+    /// One deadline bounds the entire RPC, including its response body.
+    import wasi:clocks/monotonic-clock@0.3.0;
 
     export wasi:http/handler@0.3.0;
 }
