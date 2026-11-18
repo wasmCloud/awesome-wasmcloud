@@ -223,6 +223,7 @@ def verify_couchbase(fixture, sockets):
                  ("complete", "document=abcdefghij", None), ("truncated", "::RequestFailed", None),
                  ("timeout", "::Timeout", None), ("slow", "::Timeout", None)]
         cases += [("query-context", "default:`test.bucket`.`_default`", None)]
+        cases += [(path, "::Timeout", None) for path in ["query-timeout", "query-timeout-http"]]
         cases += [(f"large-{operation}-ttl", "::InvalidArgument", None)
                   for operation in ["insert", "upsert", "replace", "touch", "get-touch"]]
         if not sockets:

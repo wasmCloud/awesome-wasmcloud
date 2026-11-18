@@ -54,6 +54,8 @@ pub fn parse_response(status: u16, payload: &[u8]) -> Result<Value, Failure> {
             .unwrap_or("the query failed")
             .to_string();
         return Err(match error.get("code").and_then(Value::as_u64) {
+            // The Query Service can report its deadline in an HTTP 200 envelope.
+            Some(1080) => Failure::Timeout,
             Some(3000) => Failure::InvalidArgument(message),
             Some(12003) | Some(12021) => Failure::InvalidArgument(format!(
                 "the statement referenced a keyspace that does not exist: {message}"
@@ -119,6 +121,14 @@ pub fn scan_vector(tokens: impl IntoIterator<Item = (u64, u64, u64)>) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_service_deadlines_keep_their_timeout_classification() {
+        let body = br#"{"errors":[{"code":1080,"msg":"Timeout 1ms exceeded"}],"status":"timeout"}"#;
+        for status in [200, 400, 500] {
+            assert_eq!(parse_response(status, body), Err(Failure::Timeout));
+        }
+    }
 
     #[test]
     fn context_preserves_identifier_boundaries() {
