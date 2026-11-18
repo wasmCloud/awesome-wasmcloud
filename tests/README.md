@@ -8,6 +8,10 @@ cargo test --locked --manifest-path host-plugins/component/couchbase/Cargo.toml
 cargo test --locked --manifest-path host-plugins/component/couchbase-wasi-sockets-p3/Cargo.toml
 ```
 
+The sockets tests also verify shared-connection ownership, teardown during an
+in-flight call or bind, credential rotation, failed-bind cleanup, and diagnostics
+that identify invalid configuration keys without exposing their values.
+
 Run the live protocol checks from the repository root:
 
 ```sh

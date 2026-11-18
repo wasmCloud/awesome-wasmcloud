@@ -10,11 +10,11 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::sync::{Mutex, PoisonError};
 
 use crate::bindings;
 use crate::conn::Connection;
 use crate::config::{Binding, ConnectionKey};
+use crate::lifecycle::State;
 use crate::proto::{self, op, status};
 use crate::query;
 use crate::transport;
@@ -41,20 +41,10 @@ use bindings::wasmcloud::host::{binding_secrets, identity};
 use bindings::wasmcloud::secrets::reveal::reveal;
 use bindings::wasmcloud::secrets::store::SecretValue;
 
-/// Where a call lands: the workload, and the `(implements ..)` label it imported
-/// the capability under, if any.
-type BindingKey = (String, Option<String>);
-
-/// Each workload's validated bindings.
-static BINDINGS: Mutex<BTreeMap<BindingKey, Binding>> = Mutex::new(BTreeMap::new());
-
 thread_local! {
-    /// Live connections, keyed by [`Binding::connection_key`]. A connection is
-    /// taken out while it is in use and put back afterwards, so two concurrent
-    /// calls on one binding open two connections rather than interleaving
-    /// frames on one -- the protocol would allow pipelining, but only with a
-    /// reader that demultiplexes on the opaque.
-    static CONNECTIONS: RefCell<BTreeMap<ConnectionKey, Connection>> = RefCell::new(BTreeMap::new());
+    /// Validated bindings and their idle connections share one ownership model.
+    /// No borrow of this state crosses an await.
+    static STATE: RefCell<State<Connection>> = const { RefCell::new(State::new()) };
 }
 
 /// What the server uses when a lock request names no duration.
@@ -62,37 +52,50 @@ const DEFAULT_LOCK_SECONDS: u32 = 15;
 
 struct Component;
 
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
 
 impl LifecycleGuest for Component {
     async fn on_workload_bind(workload: WorkloadInfo) -> Result<(), String> {
-        let bound = bind(&workload).await;
-        // The host withholds a rejection's text from the workload's status when
-        // the bind carried secrets, since it cannot know what the text quotes.
-        // These name a host, a bucket and a user, never a value, so they go to
-        // the log, or a bad credential from etcd would fail with no reason at all.
-        if let Err(reason) = &bound {
-            eprintln!("couchbase plugin: refused a bind: {reason}");
-        }
-        bound
+        // Let the host redact errors for secret-bearing binds. Printing the
+        // reason here would bypass that policy: validation can quote a secret.
+        bind(&workload).await
     }
 
     async fn on_workload_unbind(id: String) {
-        lock(&BINDINGS).retain(|(workload, _), _| *workload != id);
-        // The connection stays cached: another workload may share it, and the
-        // handshake is expensive. It goes when the plugin's store restarts.
+        STATE.with(|state| state.borrow_mut().unbind(&id));
     }
 }
 
 /// Validate a workload's bindings and connect them, so a bad endpoint or
 /// credential fails the deploy rather than the workload's first call.
 async fn bind(workload: &WorkloadInfo) -> Result<(), String> {
+    let token = STATE.with(|state| state.borrow_mut().start_bind(workload.id.clone()));
+    match prepare_bind(workload).await {
+        Ok((bound, opened)) => {
+            if STATE.with(|state| state.borrow_mut().commit_bind(token, bound, opened)) {
+                Ok(())
+            } else {
+                Err("the workload binding was cancelled during validation".into())
+            }
+        }
+        Err(error) => {
+            STATE.with(|state| state.borrow_mut().cancel_bind(token));
+            Err(error)
+        }
+    }
+}
+
+async fn prepare_bind(
+    workload: &WorkloadInfo,
+) -> Result<
+    (
+        Vec<(Option<String>, Binding)>,
+        BTreeMap<ConnectionKey, Connection>,
+    ),
+    String,
+> {
     let refuse = |reason: String| {
         format!(
             "workload `{}` in namespace `{}`: wasmcloud:couchbase {reason}",
@@ -112,23 +115,27 @@ async fn bind(workload: &WorkloadInfo) -> Result<(), String> {
         bound.push((iface.name.clone(), binding));
     }
 
+    let mut opened = BTreeMap::new();
     for (_, binding) in &bound {
-        let reached = within(binding.timeout_ms, connect(binding))
+        let key = binding.connection_key();
+        if opened.contains_key(&key) || STATE.with(|state| state.borrow().has_connection(&key)) {
+            continue;
+        }
+        let reached = within(binding.timeout_ms, open_connection(binding))
             .await
             .unwrap_or_else(|| Err(format!("no answer within {}ms", binding.timeout_ms)));
-        reached.map_err(|e| {
+        let connection = reached.map_err(|e| {
             format!(
                 "workload `{}`: could not reach Couchbase at `{}:{}`: {e}",
                 workload.name, binding.host, binding.port
             )
         })?;
+        opened.insert(key, connection);
     }
 
-    let mut bindings = lock(&BINDINGS);
-    for (name, binding) in bound {
-        bindings.insert((workload.id.clone(), name), binding);
-    }
-    Ok(())
+    // If any validation failed, opened connections drop without entering the
+    // shared cache. Only a still-current bind can publish this prepared state.
+    Ok((bound, opened))
 }
 
 /// The keys of this binding filled from a plugin-backed secret, which reach the
@@ -155,12 +162,18 @@ fn caller_binding() -> Result<Binding, DocumentError> {
             "no in-flight caller: wasmcloud:couchbase can only be used from a workload's capability call".to_string(),
         ));
     }
-    let key = (workload.clone(), identity::get_binding_name());
-    lock(&BINDINGS).get(&key).cloned().ok_or_else(|| {
-        DocumentError::NotConfigured(format!(
-            "workload `{workload}` has no wasmcloud:couchbase binding on this plugin"
-        ))
-    })
+    STATE
+        .with(|state| {
+            state
+                .borrow()
+                .binding(&workload, identity::get_binding_name())
+                .cloned()
+        })
+        .ok_or_else(|| {
+            DocumentError::NotConfigured(format!(
+                "workload `{workload}` has no wasmcloud:couchbase binding on this plugin"
+            ))
+        })
 }
 
 /// Run `operation` under a deadline, or give up on it and return `None`.
@@ -174,13 +187,8 @@ async fn within<F: Future>(timeout_ms: u32, operation: F) -> Option<F::Output> {
     transport::within(operation, monotonic_clock::wait_for(timeout_ns)).await
 }
 
-/// Resolve the binding's host and open a connection, unless one is cached.
-async fn connect(binding: &Binding) -> Result<(), String> {
-    let key = binding.connection_key();
-    if CONNECTIONS.with(|c| c.borrow().contains_key(&key)) {
-        return Ok(());
-    }
-
+/// Resolve the binding's host and return a new authenticated connection.
+async fn open_connection(binding: &Binding) -> Result<Connection, String> {
     let addresses = ip_name_lookup::resolve_addresses(binding.host.clone())
         .await
         .map_err(|e| format!("could not resolve `{}`: {e:?}", binding.host))?;
@@ -189,7 +197,7 @@ async fn connect(binding: &Binding) -> Result<(), String> {
         .next()
         .ok_or_else(|| format!("`{}` resolved to no addresses", binding.host))?;
 
-    let conn = Connection::open(
+    Connection::open(
         address,
         binding.port,
         &binding.username,
@@ -198,9 +206,7 @@ async fn connect(binding: &Binding) -> Result<(), String> {
         &binding.scope,
         &binding.collection,
     )
-    .await?;
-    CONNECTIONS.with(|c| c.borrow_mut().insert(key, conn));
-    Ok(())
+    .await
 }
 
 /// Run one operation on this binding's connection, within its time limit.
@@ -228,19 +234,25 @@ async fn on_connection<F, T>(binding: &Binding, f: F) -> Result<T, DocumentError
 where
     F: AsyncFnOnce(&mut Connection) -> Result<T, DocumentError>,
 {
-    connect(binding).await.map_err(DocumentError::RequestFailed)?;
     let key = binding.connection_key();
-    let mut conn = CONNECTIONS
-        .with(|c| c.borrow_mut().remove(&key))
-        .ok_or_else(|| DocumentError::Other("connection vanished from the cache".to_string()))?;
+    let cached = STATE.with(|state| state.borrow_mut().take_connection(&key));
+    let mut conn = match cached {
+        Some(conn) => conn,
+        None => open_connection(binding)
+            .await
+            .map_err(DocumentError::RequestFailed)?,
+    };
 
     let result = f(&mut conn).await;
 
     // A desynchronized connection must not be reused: its next reply would be
     // the previous call's. Anything else is still good.
-    let reusable = !matches!(result, Err(DocumentError::Other(_)) | Err(DocumentError::RequestFailed(_)));
+    let reusable = !matches!(
+        result,
+        Err(DocumentError::Other(_)) | Err(DocumentError::RequestFailed(_))
+    );
     if reusable {
-        CONNECTIONS.with(|c| c.borrow_mut().insert(key, conn));
+        STATE.with(|state| state.borrow_mut().return_connection(key, conn));
     }
     result
 }

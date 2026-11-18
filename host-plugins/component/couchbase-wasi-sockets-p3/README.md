@@ -152,8 +152,15 @@ A plugin-backed secret (`pluginSecrets`, served by another host plugin) cannot
 fill the entry itself, only its named `bindings`. The workload then imports the
 capability by `(implements ..)` label, and each label is a binding with its own
 cluster and keyspace. When a bind carrying such a secret is refused, the host
-withholds the reason from the workload's status, so the plugin writes it to
-stderr, which reaches the host's log.
+withholds the reason from the workload's status. The plugin leaves error
+reporting to the host and never copies the rejection text to stderr. Configuration
+validation identifies the failing key without quoting the supplied value.
+
+Idle KV connections are shared only while a bound workload owns the same
+credentials and keyspace. Unbinding the last owner releases its cached connection;
+an in-flight call finishing afterward cannot put it back. Connections opened
+during bind validation are published only after every binding succeeds, and a
+cancelled bind cannot publish state after unbind or a newer bind.
 
 
 ## Building
