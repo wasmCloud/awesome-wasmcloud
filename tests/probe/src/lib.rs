@@ -15,14 +15,106 @@ impl Guest for Probe {
             .unwrap_or_default()
             .trim_start_matches('/')
             .to_string();
-        let body = if id == "oversized-id" || id == "empty-id" {
-            let key = if id == "empty-id" { String::new() } else { "x".repeat(65_537) };
+        let body = if id.starts_with("large-") && id.ends_with("-ttl") {
+            use bindings::wasmcloud::couchbase::types::DurabilityLevel;
+            use document::*;
+            let result = match id.as_str() {
+                "large-touch-ttl" => touch(
+                    "range-probe".into(),
+                    Some(DocumentTouchOptions {
+                        expires_in: u64::MAX,
+                        timeout_ns: None,
+                        retry_strategy: None,
+                        parent_span: None,
+                    }),
+                )
+                .await
+                .map(|_| ()),
+                "large-get-touch-ttl" => get_and_touch(
+                    "range-probe".into(),
+                    Some(DocumentGetAndTouchOptions {
+                        expires_in: u64::MAX,
+                        timeout_ns: None,
+                        retry_strategy: None,
+                        parent_span: None,
+                    }),
+                )
+                .await
+                .map(|_| ()),
+                "large-insert-ttl" => insert(
+                    "range-probe".into(),
+                    b"{}".to_vec(),
+                    Some(DocumentInsertOptions {
+                        expires_in_ns: u64::MAX,
+                        flags: None,
+                        persist_to: 0,
+                        replicate_to: 0,
+                        durability_level: DurabilityLevel::Unknown,
+                        timeout_ns: None,
+                        retry_strategy: None,
+                        parent_span: None,
+                    }),
+                )
+                .await
+                .map(|_| ()),
+                "large-replace-ttl" => replace(
+                    "range-probe".into(),
+                    b"{}".to_vec(),
+                    Some(DocumentReplaceOptions {
+                        cas: 0,
+                        expires_in_ns: u64::MAX,
+                        preserve_expiry: false,
+                        flags: None,
+                        persist_to: 0,
+                        replicate_to: 0,
+                        durability_level: DurabilityLevel::Unknown,
+                        timeout_ns: None,
+                        retry_strategy: None,
+                        parent_span: None,
+                    }),
+                )
+                .await
+                .map(|_| ()),
+                _ => upsert(
+                    "range-probe".into(),
+                    b"{}".to_vec(),
+                    Some(DocumentUpsertOptions {
+                        expires_in_ns: u64::MAX,
+                        preserve_expiry: false,
+                        flags: None,
+                        persist_to: 0,
+                        replicate_to: 0,
+                        durability_level: DurabilityLevel::Unknown,
+                        timeout_ns: None,
+                        retry_strategy: None,
+                        parent_span: None,
+                    }),
+                )
+                .await
+                .map(|_| ()),
+            };
+            format!("TTL {result:?}")
+        } else if id == "dot-lock-id" {
+            format!("LOCK {:?}", document::get_and_lock("..".into(), None).await)
+        } else if id == "dot-remove-id" {
+            format!("REMOVE {:?}", document::remove(".".into(), None).await)
+        } else if id == "oversized-id" || id == "empty-id" {
+            let key = if id == "empty-id" {
+                String::new()
+            } else {
+                "x".repeat(65_537)
+            };
             match document::upsert(key, b"{}".to_vec(), None).await {
                 Ok(_) => "WRITE OK".to_string(),
                 Err(error) => format!("WRITE ERROR {error:?}"),
             }
-        } else if id == "query-error" {
-            match sqlpp::query("SELECT RAW 1".into(), vec![], None).await {
+        } else if id == "query-error" || id == "query-context" {
+            let statement = if id == "query-context" {
+                "SELECT RAW \"query-context\""
+            } else {
+                "SELECT RAW 1"
+            };
+            match sqlpp::query(statement.into(), vec![], None).await {
                 Ok(value) => format!("QUERY OK {value:?}"),
                 Err(error) => format!("QUERY ERROR {error:?}"),
             }
@@ -35,7 +127,12 @@ impl Guest for Probe {
                 retry_strategy: None,
                 parent_span: None,
             };
-            match document::get(id, Some(options)).await {
+            let key = match id.as_str() {
+                "dot-id" => ".",
+                "dotdot-id" => "..",
+                _ => &id,
+            };
+            match document::get(key.into(), Some(options)).await {
                 Ok(value) => format!(
                     "OK cas={} expiry={:?} document={}",
                     value.cas,

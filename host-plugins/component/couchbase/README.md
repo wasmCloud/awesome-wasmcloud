@@ -386,6 +386,15 @@ whole thing. The gateway is the real Data API, not a reimplementation of it.
 
 ### `with-expiry`
 
+Relative TTLs are rounded up to whole seconds. Insert, upsert, replace, touch
+and get-and-touch reject an expiry beyond Couchbase's unsigned 32-bit Unix
+timestamp range (ending in 2106) before sending a mutation. Large TTLs are never
+clamped or allowed to wrap into the past.
+
+The Data API gateway normalizes dot-only URL segments, including percent-encoded
+forms. Document IDs `.` and `..` therefore return `unsupported` on this transport;
+the sockets plugin can address them directly.
+
 A read reports the document's absolute expiry in an `Expires` header, present
 only when the document has a TTL. `expires-at` is filled from it.
 

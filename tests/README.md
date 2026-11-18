@@ -35,6 +35,9 @@ The suite covers:
 | Data API | Complete, truncated, stalled and trickling document bodies |
 | KV metadata | A concurrent replacement retries to a matching CAS; continuous changes time out; metadata denial and malformed metadata return errors; absent TTL remains absent |
 | KV framing and keys | Invalid lengths, oversized replies, wrong opcode/opaque, empty and oversized document IDs are refused without trapping or sending a write under a different ID |
+| Query contexts | Bucket names containing dots retain their identifier boundaries on both transports |
+| Expiry range | Insert, upsert, replace, touch and get-and-touch reject out-of-range TTLs before dispatch |
+| Gateway path limits | Dot-only IDs are explicitly refused for reads, writes and locking before any Data API request |
 
 The real Couchbase Server / Cloud Native Gateway scenario remains in
 [`host-plugins/component/couchbase/verification`](../host-plugins/component/couchbase/verification/).
@@ -49,6 +52,7 @@ These are capability examples, not complete Couchbase or gRPC SDKs.
 | Capability | Data API plugin | Sockets plugin |
 |---|---|---|
 | CRUD, binary values, CAS | Supported | Supported |
+| Document IDs `.` and `..` | Explicitly refused; gateway normalizes these paths | Supported |
 | Relative TTL and expiry reads | Supported | Supported; document and metadata CAS must agree |
 | SQL++, positional parameters, read-only and consistency | Supported | Supported |
 | SQL++ preserve-expiry | Forwarded | Forwarded |
@@ -67,6 +71,9 @@ implemented. The Data API forwards query metrics and client context IDs;
 the sockets transport does not. Query results contain rows, not metrics or
 profiling data. Database RBAC still determines which SQL++ keyspaces a credential
 may access; `query_context` supplies a default keyspace rather than an access rule.
+Query context identifiers are quoted so a dot in a bucket name remains part of
+that name. Both transports round TTLs up to whole seconds and refuse expiries
+beyond Couchbase's unsigned 32-bit Unix timestamp range, which ends in 2106.
 
 The gRPC transport handles uncompressed response messages and buffers a complete
 response. Compression and malformed protocol messages are rejected. Its Rust

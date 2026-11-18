@@ -383,15 +383,16 @@ fn transport_error(code: ErrorCode) -> DocumentError {
 ///
 /// Bucket, scope and collection come from the caller's binding rather than the
 /// call, matching 0.1.0-draft, where they came from the link configuration.
-fn document_path(binding: &Binding, id: &str) -> String {
-    format!(
+fn document_path(binding: &Binding, id: &str) -> Result<String, DocumentError> {
+    let segment = api::document_segment(id).map_err(DocumentError::Unsupported)?;
+    Ok(format!(
         "{}/v1/buckets/{}/scopes/{}/collections/{}/documents/{}",
         binding.base_path,
         api::encode_segment(&binding.bucket),
         api::encode_segment(&binding.scope),
         api::encode_segment(&binding.collection),
-        api::encode_segment(id),
-    )
+        segment,
+    ))
 }
 
 /// The `/v1.alpha` path for one document's locking endpoints.
@@ -400,15 +401,16 @@ fn document_path(binding: &Binding, id: &str) -> String {
 /// with `--alpha-endpoints`. An endpoint that does not have it answers 404,
 /// which reads as `not-found` — so callers see a missing document rather than a
 /// missing feature.
-fn document_alpha_path(binding: &Binding, id: &str) -> String {
-    format!(
+fn document_alpha_path(binding: &Binding, id: &str) -> Result<String, DocumentError> {
+    let segment = api::document_segment(id).map_err(DocumentError::Unsupported)?;
+    Ok(format!(
         "{}/v1.alpha/buckets/{}/scopes/{}/collections/{}/documents/{}",
         binding.base_path,
         api::encode_segment(&binding.bucket),
         api::encode_segment(&binding.scope),
         api::encode_segment(&binding.collection),
-        api::encode_segment(id),
-    )
+        segment,
+    ))
 }
 
 /// The `X-CB-DurabilityLevel` value, or `None` to leave the header off.
@@ -426,12 +428,13 @@ fn durability(level: DurabilityLevel) -> Option<&'static str> {
 
 /// Couchbase TTLs have second granularity, so a sub-second `expires-in-ns`
 /// would silently become "no expiry"; round it up to one second instead.
-fn expiry_header(expires_in_ns: u64) -> Option<(&'static str, String)> {
+fn expiry_header(expires_in_ns: u64) -> Result<Option<(&'static str, String)>, DocumentError> {
     if expires_in_ns == 0 {
-        return None;
+        return Ok(None);
     }
-    let seconds = expires_in_ns.div_ceil(1_000_000_000).max(1);
-    Some(("expires", api::expiry_duration(seconds.min(u32::MAX.into()) as u32)))
+    let seconds = api::expiry_seconds(expires_in_ns, system_clock::now().seconds)
+        .map_err(DocumentError::InvalidArgument)?;
+    Ok(Some(("expires", api::expiry_duration(seconds))))
 }
 
 /// A write's headers: content type, plus whichever options were set.
@@ -440,7 +443,7 @@ fn write_headers(
     expires_in_ns: u64,
     level: DurabilityLevel,
     flags: Option<u32>,
-) -> Vec<(&'static str, String)> {
+) -> Result<Vec<(&'static str, String)>, DocumentError> {
     // Content-Type is what the Data API derives flags from by default;
     // `X-CB-Flags` overrides it outright, so an explicit caller value wins.
     let mut headers = vec![("content-type", "application/json".to_string())];
@@ -450,13 +453,13 @@ fn write_headers(
     if cas != 0 {
         headers.push(("if-match", api::format_cas(cas)));
     }
-    if let Some(expiry) = expiry_header(expires_in_ns) {
+    if let Some(expiry) = expiry_header(expires_in_ns)? {
         headers.push(expiry);
     }
     if let Some(level) = durability(level) {
         headers.push(("x-cb-durabilitylevel", level.to_string()));
     }
-    headers
+    Ok(headers)
 }
 
 
@@ -582,12 +585,12 @@ impl DocumentGuest for Component {
             reject_unhonoured_write_options(false, o.persist_to, o.replicate_to)?;
         }
         let binding = binding.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
-        let path = document_path(&binding, &id);
+        let path = document_path(&binding, &id)?;
         write(
             &binding,
             Method::Post,
             path,
-            write_headers(0, expires, level, options.as_ref().and_then(|o| o.flags)),
+            write_headers(0, expires, level, options.as_ref().and_then(|o| o.flags))?,
             Some(doc),
         )
         .await
@@ -608,7 +611,7 @@ impl DocumentGuest for Component {
             reject_unhonoured_write_options(o.preserve_expiry, o.persist_to, o.replicate_to)?;
         }
         let binding = binding.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
-        let mut headers = write_headers(cas, expires, level, options.as_ref().and_then(|o| o.flags));
+        let mut headers = write_headers(cas, expires, level, options.as_ref().and_then(|o| o.flags))?;
         // `replace` requires the document to exist. With no caller CAS to
         // condition on, the RFC 7232 wildcard asks the cluster to reject the
         // write when nothing is there, which is what keeps `replace` from
@@ -618,7 +621,7 @@ impl DocumentGuest for Component {
             // DocumentNotFound, which is exactly `replace`'s precondition.
             headers.push(("if-match", "*".to_string()));
         }
-        let path = document_path(&binding, &id);
+        let path = document_path(&binding, &id)?;
         write(
             &binding,
             Method::Put,
@@ -644,12 +647,12 @@ impl DocumentGuest for Component {
             reject_unhonoured_write_options(o.preserve_expiry, o.persist_to, o.replicate_to)?;
         }
         let binding = binding.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
-        let path = document_path(&binding, &id);
+        let path = document_path(&binding, &id)?;
         write(
             &binding,
             Method::Put,
             path,
-            write_headers(0, expires, level, options.as_ref().and_then(|o| o.flags)),
+            write_headers(0, expires, level, options.as_ref().and_then(|o| o.flags))?,
             Some(doc),
         )
         .await
@@ -673,7 +676,7 @@ impl DocumentGuest for Component {
         }
 
         let binding = binding.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
-        let mut path = document_path(&binding, &id);
+        let mut path = document_path(&binding, &id)?;
         if let Some(project) = options.as_ref().and_then(|o| o.project.as_ref()) {
             if !project.is_empty() {
                 // One comma-separated `project`, not a repeated parameter: the
@@ -710,11 +713,11 @@ impl DocumentGuest for Component {
         let binding = binding.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
         // A delete carries no body, so drop the content-type that leads the
         // write headers.
-        let headers: Vec<_> = write_headers(cas, 0, level, None)
+        let headers: Vec<_> = write_headers(cas, 0, level, None)?
             .into_iter()
             .filter(|(name, _)| *name != "content-type")
             .collect();
-        let path = document_path(&binding, &id);
+        let path = document_path(&binding, &id)?;
         write(&binding, Method::Delete, path, headers, None).await
     }
 
@@ -738,7 +741,7 @@ impl DocumentGuest for Component {
             lock_time.div_ceil(1_000_000_000).max(1).min(u32::MAX.into()) as u32
         };
 
-        let path = format!("{}/lock", document_alpha_path(&binding, &id));
+        let path = format!("{}/lock", document_alpha_path(&binding, &id)?);
         let body = format!("{{\"lockTime\":{seconds}}}").into_bytes();
         let reply = send(
             &binding,
@@ -773,7 +776,7 @@ impl DocumentGuest for Component {
             ));
         }
         let binding = binding.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
-        let path = format!("{}/unlock", document_alpha_path(&binding, &id));
+        let path = format!("{}/unlock", document_alpha_path(&binding, &id)?);
         let reply = send(
             &binding,
             Method::Post,
@@ -817,7 +820,7 @@ impl DocumentGuest for Component {
         let expires_in = options.as_ref().map_or(0, |o| o.expires_in);
         let binding = binding.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
         let body = touch_body(expires_in, false)?;
-        let path = format!("{}/touch", document_path(&binding, &id));
+        let path = format!("{}/touch", document_path(&binding, &id)?);
         write(
             &binding,
             Method::Post,
@@ -836,7 +839,7 @@ impl DocumentGuest for Component {
         let expires_in = options.as_ref().map_or(0, |o| o.expires_in);
         let binding = binding.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
         let body = touch_body(expires_in, true)?;
-        let path = format!("{}/touch", document_path(&binding, &id));
+        let path = format!("{}/touch", document_path(&binding, &id)?);
 
         let reply = send(
             &binding,
@@ -871,11 +874,12 @@ fn touch_body(expires_in_ns: u64, return_content: bool) -> Result<Vec<u8>, Docum
                 .to_string(),
         ));
     }
-    let seconds = expires_in_ns.div_ceil(1_000_000_000).max(1);
+    let now = system_clock::now();
+    let seconds = api::expiry_seconds(expires_in_ns, now.seconds)
+        .map_err(DocumentError::InvalidArgument)?;
     // The touch endpoint takes an absolute instant, so a relative TTL has to be
     // added to the wall clock here.
-    let now = system_clock::now();
-    let expires_at = now.seconds.saturating_add(seconds as i64);
+    let expires_at = now.seconds + i64::from(seconds);
     Ok(serde_json::json!({
         "expiry": timefmt::iso8601_utc(expires_at),
         "returnContent": return_content,
@@ -933,7 +937,7 @@ impl SqlppGuest for Component {
         // was granted rather than against the whole cluster.
         request.insert(
             "query_context".to_string(),
-            format!("default:{}.{}", binding.bucket, binding.scope).into(),
+            crate::query::context(&binding.bucket, &binding.scope).into(),
         );
 
         // `consistent-with` is served by turning the caller's tokens into the

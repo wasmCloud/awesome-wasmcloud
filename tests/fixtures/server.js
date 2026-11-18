@@ -48,11 +48,22 @@ http.createServer((req, res) => {
 }).listen(18099, '0.0.0.0');
 
 http.createServer((req, res) => {
-  req.resume(); const mode = req.url.split('/').pop();
+  requests.push({kind: 'data-api', method: req.method, path: req.url});
+  const mode = req.url.split('/').pop();
   if (req.method === 'POST') {
-    res.writeHead(503, {'content-type': 'application/json'});
-    res.end('{"message":"query service temporarily unavailable"}'); return;
+    let body = ''; req.on('data', chunk => {body += chunk;});
+    req.on('end', () => {
+      const data = JSON.parse(body || '{}');
+      if (data.statement === 'SELECT RAW "query-context"') {
+        res.writeHead(200, {'content-type': 'application/json'});
+        res.end(JSON.stringify({results: [data.query_context], status: 'success'}));
+      } else {
+        res.writeHead(503, {'content-type': 'application/json'});
+        res.end('{"message":"query service temporarily unavailable"}');
+      }
+    }); return;
   }
+  req.resume();
   res.writeHead(200, {'content-type': 'application/octet-stream',
     'content-length': 10, etag: '1234567890abcdef'});
   if (mode === 'complete') res.end('abcdefghij');

@@ -210,7 +210,7 @@ def verify_couchbase(fixture, sockets):
            "host_interfaces": [{"namespace": "wasmcloud", "package": "couchbase", "version": "0.2.0",
               "interfaces": ["types", "sqlpp-types", "document", "sqlpp"], "config": {
                   "endpoint": "couchbase://backend" if sockets else "http://backend:18009",
-                  "query-port": "18009", "bucket": "test", "username": "synthetic", "password": "synthetic",
+                  "query-port": "18009", "bucket": "test.bucket", "username": "synthetic", "password": "synthetic",
                   "timeout-ms": "100"}}]}
     artifact = "target/wasm32-wasip2/release/component_fault_probe.wasm"
     with fixture.host(PROBE, artifact, dev=dev, extra_files={plugin + ".wasm": stage}) as port:
@@ -222,10 +222,19 @@ def verify_couchbase(fixture, sockets):
                  ("oversized-id", "::InvalidArgument", None), ("empty-id", "::InvalidArgument", None)] if sockets else [
                  ("complete", "document=abcdefghij", None), ("truncated", "::RequestFailed", None),
                  ("timeout", "::Timeout", None), ("slow", "::Timeout", None)]
+        cases += [("query-context", "default:`test.bucket`.`_default`", None)]
+        cases += [(f"large-{operation}-ttl", "::InvalidArgument", None)
+                  for operation in ["insert", "upsert", "replace", "touch", "get-touch"]]
+        if not sockets:
+            cases += [(path, "::Unsupported", None)
+                      for path in ["dot-id", "dotdot-id", "dot-lock-id", "dot-remove-id"]]
         for path, expected, extra in cases:
+            before = len(fixture.requests())
             _, _, body = request(port, "/" + path, method="GET")
             text = body.decode()
             assert expected in text and (extra is None or extra in text), (path, text)
+            if path.startswith(("large-", "dot-", "dotdot-")):
+                assert len(fixture.requests()) == before, f"{path} reached the service"
         assert not any(entry.get("kind") == "kv-write" for entry in fixture.requests()), "invalid keys reached the server"
     print(f"{plugin} failure cases: {len(cases)} checks passed", flush=True)
     return len(cases)
