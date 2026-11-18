@@ -108,11 +108,12 @@ impl Guest for Probe {
                 Ok(_) => "WRITE OK".to_string(),
                 Err(error) => format!("WRITE ERROR {error:?}"),
             }
-        } else if id == "query-error" || id == "query-context" {
-            let statement = if id == "query-context" {
-                "SELECT RAW \"query-context\""
-            } else {
-                "SELECT RAW 1"
+        } else if id.starts_with("query-") {
+            let statement = match id.as_str() {
+                "query-context" => "SELECT RAW \"query-context\"",
+                "query-timeout" => "SELECT RAW \"query-timeout\"",
+                "query-timeout-http" => "SELECT RAW \"query-timeout-http\"",
+                _ => "SELECT RAW 1",
             };
             match sqlpp::query(statement.into(), vec![], None).await {
                 Ok(value) => format!("QUERY OK {value:?}"),

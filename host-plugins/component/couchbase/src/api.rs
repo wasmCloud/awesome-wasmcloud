@@ -78,6 +78,7 @@ pub fn classify(status: u16, body: &[u8]) -> Failure {
     if let Some(code) = code.as_deref() {
         match code {
             // https://docs.couchbase.com/server/current/n1ql/n1ql-language-reference/n1ql-error-codes.html
+            "1080" => return Failure::Timeout,
             "3000" => return Failure::InvalidArgument(message),
             "12003" | "12021" => return Failure::NotFound,
             "13014" => return Failure::Unauthorized,
@@ -291,6 +292,14 @@ fn truncate(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_service_deadlines_keep_their_timeout_classification() {
+        let body = br#"{"errors":[{"code":1080,"msg":"Timeout 1ms exceeded"}],"status":"timeout"}"#;
+        for status in [200, 400, 500] {
+            assert_eq!(classify(status, body), Failure::Timeout);
+        }
+    }
 
     #[test]
     fn dot_only_document_ids_cannot_become_parent_resources() {

@@ -40,6 +40,7 @@ The suite covers:
 | KV metadata | A concurrent replacement retries to a matching CAS; continuous changes time out; metadata denial and malformed metadata return errors; absent TTL remains absent |
 | KV framing and keys | Invalid lengths, oversized replies, wrong opcode/opaque, empty and oversized document IDs are refused without trapping or sending a write under a different ID |
 | Query contexts | Bucket names containing dots retain their identifier boundaries on both transports |
+| Query Service deadlines | Error `1080` becomes `timeout` on both transports, whether carried by HTTP 200 or HTTP 500 |
 | Expiry range | Insert, upsert, replace, touch and get-and-touch reject out-of-range TTLs before dispatch |
 | Gateway path limits | Dot-only IDs are explicitly refused for reads, writes and locking before any Data API request |
 

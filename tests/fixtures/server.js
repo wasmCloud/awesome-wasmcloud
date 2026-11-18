@@ -57,6 +57,10 @@ http.createServer((req, res) => {
       if (data.statement === 'SELECT RAW "query-context"') {
         res.writeHead(200, {'content-type': 'application/json'});
         res.end(JSON.stringify({results: [data.query_context], status: 'success'}));
+      } else if (['SELECT RAW "query-timeout"', 'SELECT RAW "query-timeout-http"'].includes(data.statement)) {
+        res.writeHead(data.statement.includes('timeout-http') ? 500 : 200,
+          {'content-type': 'application/json'});
+        res.end(JSON.stringify({errors: [{code: 1080, msg: 'Timeout 1ms exceeded'}], status: 'timeout'}));
       } else {
         res.writeHead(503, {'content-type': 'application/json'});
         res.end('{"message":"query service temporarily unavailable"}');
