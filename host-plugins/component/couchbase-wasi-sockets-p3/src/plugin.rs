@@ -782,7 +782,7 @@ impl SqlppGuest for Component {
         // collection inside it rather than resolving against the cluster.
         request.insert(
             "query_context".to_string(),
-            format!("default:{}.{}", binding.bucket, binding.scope).into(),
+            query::context(&binding.bucket, &binding.scope).into(),
         );
         if !args.is_empty() {
             request.insert("args".to_string(), serde_json::Value::Array(args));

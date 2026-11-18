@@ -188,6 +188,30 @@ pub fn encode_segment(segment: &str) -> String {
     out
 }
 
+/// The gateway cleans dot-only path segments, even when percent-encoded.
+/// Refuse them before dispatch rather than addressing a parent resource.
+pub fn document_segment(id: &str) -> Result<String, String> {
+    if matches!(id, "." | "..") {
+        return Err("the Data API gateway cannot address dot-only document IDs; use the sockets plugin for these IDs".into());
+    }
+    Ok(encode_segment(id))
+}
+
+/// Round a relative TTL to seconds and check Couchbase's absolute u32 expiry
+/// range before a gateway can narrow or wrap it. Return the relative duration.
+pub fn expiry_seconds(ns: u64, now: i64) -> Result<u32, String> {
+    let seconds = ns.div_ceil(1_000_000_000);
+    if seconds == 0 {
+        return Ok(0);
+    }
+    let now = u64::try_from(now).map_err(|_| "the system clock is before the Unix epoch")?;
+    let absolute = now
+        .checked_add(seconds)
+        .ok_or("expiry timestamp overflowed")?;
+    u32::try_from(absolute).map_err(|_| "expiry is beyond Couchbase's timestamp range")?;
+    u32::try_from(seconds).map_err(|_| "expiry duration is too large".into())
+}
+
 /// Format a TTL as the Go duration string the Data API's `Expires` header
 /// takes. `0` means "no expiry".
 pub fn expiry_duration(seconds: u32) -> String {
@@ -267,6 +291,35 @@ fn truncate(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dot_only_document_ids_cannot_become_parent_resources() {
+        for id in [".", ".."] {
+            assert!(document_segment(id).is_err());
+        }
+        for id in ["a.b", "...", "a/..", "%2E"] {
+            assert_eq!(document_segment(id), Ok(encode_segment(id)));
+        }
+    }
+
+    #[test]
+    fn oversized_expiry_is_refused_instead_of_clamped_or_wrapped() {
+        let now = 1_800_000_000;
+        assert_eq!(expiry_seconds(0, now), Ok(0));
+        assert_eq!(expiry_seconds(1, now), Ok(1));
+        assert_eq!(
+            expiry_seconds(31 * 86_400 * 1_000_000_000, now),
+            Ok(31 * 86_400)
+        );
+        let max_seconds = u64::from(u32::MAX) - now as u64;
+        assert_eq!(
+            expiry_seconds(max_seconds * 1_000_000_000, now),
+            Ok(max_seconds as u32)
+        );
+        assert!(expiry_seconds(max_seconds * 1_000_000_000 + 1, now).is_err());
+        assert!(expiry_seconds(3_000_000_000 * 1_000_000_000, now).is_err());
+        assert!(expiry_seconds(u64::MAX, now).is_err());
+    }
 
     #[test]
     fn parses_the_expires_header_the_gateway_actually_sends() {

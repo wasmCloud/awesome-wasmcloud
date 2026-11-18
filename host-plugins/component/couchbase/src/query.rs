@@ -4,6 +4,16 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
+/// Quote each path component independently: a dot in a bucket name is data,
+/// not another element of the query context. SQL++ escapes a backtick by doubling it.
+pub fn context(bucket: &str, scope: &str) -> String {
+    format!(
+        "default:`{}`.`{}`",
+        bucket.replace('`', "``"),
+        scope.replace('`', "``")
+    )
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Failure {
     InvalidArgument(String),
@@ -109,6 +119,15 @@ pub fn scan_vector(tokens: impl IntoIterator<Item = (u64, u64, u64)>) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_preserves_identifier_boundaries() {
+        assert_eq!(
+            context("test.bucket", "inventory"),
+            "default:`test.bucket`.`inventory`"
+        );
+        assert_eq!(context("a`b", "c.d"), "default:`a``b`.`c.d`");
+    }
 
     #[test]
     fn http_failures_without_a_query_error_array_cannot_become_empty_results() {
