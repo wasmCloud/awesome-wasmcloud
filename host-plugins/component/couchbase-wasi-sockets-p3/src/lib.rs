@@ -24,6 +24,9 @@ mod bindings {
 
 pub mod config;
 
+#[cfg(any(target_family = "wasm", test))]
+mod lifecycle;
+
 #[cfg(target_family = "wasm")]
 mod conn;
 

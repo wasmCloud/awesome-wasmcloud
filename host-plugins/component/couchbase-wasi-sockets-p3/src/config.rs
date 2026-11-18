@@ -91,7 +91,7 @@ impl Binding {
 
         let timeout_ms = match get("timeout-ms") {
             Some(raw) => raw.parse::<u32>().map_err(|_| {
-                format!("config key `timeout-ms` must be a whole number of milliseconds, got `{raw}`")
+                "config key `timeout-ms` must be a whole number of milliseconds".to_string()
             })?,
             None => DEFAULT_TIMEOUT_MS,
         };
@@ -102,7 +102,7 @@ impl Binding {
         let query_port = match get("query-port") {
             Some(raw) => raw
                 .parse::<u16>()
-                .map_err(|_| format!("config key `query-port` must be a port number, got `{raw}`"))?,
+                .map_err(|_| "config key `query-port` must be a port number".to_string())?,
             None => DEFAULT_QUERY_PORT,
         };
 
@@ -166,10 +166,8 @@ fn parse_endpoint(raw: &str) -> Result<(String, u16), String> {
                     .to_string(),
             )
         }
-        Some((scheme, _)) => {
-            return Err(format!(
-                "config key `endpoint` must use couchbase://, got scheme `{scheme}`"
-            ))
+        Some((_, _)) => {
+            return Err("config key `endpoint` must use couchbase://".to_string())
         }
         None => raw,
     };
@@ -183,7 +181,7 @@ fn parse_endpoint(raw: &str) -> Result<(String, u16), String> {
             .ok_or("config key `endpoint` has an unclosed IPv6 address")?;
         let address = host
             .parse::<std::net::Ipv6Addr>()
-            .map_err(|_| format!("config key `endpoint` has an invalid IPv6 address: `{host}`"))?;
+            .map_err(|_| "config key `endpoint` has an invalid IPv6 address".to_string())?;
         let port = if suffix.is_empty() {
             DEFAULT_KV_PORT
         } else {
@@ -191,7 +189,7 @@ fn parse_endpoint(raw: &str) -> Result<(String, u16), String> {
                 .strip_prefix(':')
                 .ok_or("config key `endpoint` has unexpected text after its IPv6 address")?;
             raw.parse::<u16>()
-                .map_err(|_| format!("config key `endpoint` has an invalid port: `{raw}`"))?
+                .map_err(|_| "config key `endpoint` has an invalid port".to_string())?
         };
         return Ok((address.to_string(), port));
     }
@@ -202,7 +200,7 @@ fn parse_endpoint(raw: &str) -> Result<(String, u16), String> {
         Some((host, port)) if !host.is_empty() => {
             let port = port
                 .parse::<u16>()
-                .map_err(|_| format!("config key `endpoint` has an invalid port: `{port}`"))?;
+                .map_err(|_| "config key `endpoint` has an invalid port".to_string())?;
             Ok((host.to_string(), port))
         }
         _ => Ok((rest.to_string(), DEFAULT_KV_PORT)),
@@ -212,6 +210,25 @@ fn parse_endpoint(raw: &str) -> Result<(String, u16), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validation_errors_do_not_echo_secret_derived_config_values() {
+        for (key, value) in [
+            ("timeout-ms", "synthetic-private-value"),
+            ("query-port", "synthetic-private-value"),
+            ("endpoint", "synthetic-private-value://backend"),
+            ("endpoint", "couchbase://[synthetic-private-value]"),
+            ("endpoint", "couchbase://backend:synthetic-private-value"),
+            ("endpoint", "couchbase://[::1]:synthetic-private-value"),
+        ] {
+            let mut pairs = minimal();
+            pairs.retain(|(k, _)| k != key);
+            pairs.push((key.into(), value.into()));
+            let error = Binding::from_config(&pairs).unwrap_err();
+            assert!(error.contains(key), "the diagnostic should identify the key");
+            assert!(!error.contains("synthetic-private-value"), "{error}");
+        }
+    }
 
     #[test]
     fn delimiters_in_credentials_do_not_alias_another_identity() {
