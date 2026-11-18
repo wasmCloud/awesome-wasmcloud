@@ -9,16 +9,15 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::future::{poll_fn, Future};
-use std::pin::pin;
+use std::future::Future;
 use std::sync::{Mutex, PoisonError};
-use std::task::Poll;
 
 use crate::bindings;
 use crate::conn::Connection;
-use crate::config::Binding;
+use crate::config::{Binding, ConnectionKey};
 use crate::proto::{self, op, status};
 use crate::query;
+use crate::transport;
 
 use bindings::exports::wasmcloud::couchbase::document::{
     DocumentGetAllReplicaOptions, DocumentGetAndLockOptions, DocumentGetAndTouchOptions,
@@ -55,7 +54,7 @@ thread_local! {
     /// calls on one binding open two connections rather than interleaving
     /// frames on one -- the protocol would allow pipelining, but only with a
     /// reader that demultiplexes on the opaque.
-    static CONNECTIONS: RefCell<BTreeMap<String, Connection>> = RefCell::new(BTreeMap::new());
+    static CONNECTIONS: RefCell<BTreeMap<ConnectionKey, Connection>> = RefCell::new(BTreeMap::new());
 }
 
 /// What the server uses when a lock request names no duration.
@@ -172,19 +171,7 @@ fn caller_binding() -> Result<Binding, DocumentError> {
 /// whatever it was waiting on.
 async fn within<F: Future>(timeout_ms: u32, operation: F) -> Option<F::Output> {
     let timeout_ns = u64::from(timeout_ms).saturating_mul(1_000_000);
-    let mut operation = pin!(operation);
-    let mut timer = pin!(monotonic_clock::wait_for(timeout_ns));
-    poll_fn(|cx| {
-        // The operation goes first, so one finishing on the deadline counts.
-        if let Poll::Ready(output) = operation.as_mut().poll(cx) {
-            return Poll::Ready(Some(output));
-        }
-        if timer.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(None);
-        }
-        Poll::Pending
-    })
-    .await
+    transport::within(operation, monotonic_clock::wait_for(timeout_ns)).await
 }
 
 /// Resolve the binding's host and open a connection, unless one is cached.
@@ -399,35 +386,14 @@ fn flags_of(extras: &[u8]) -> u32 {
 /// Select `paths` out of a JSON document, rebuilding the nesting so the result
 /// is a subset of the original shape.
 fn project(document: &[u8], paths: &[String]) -> Result<Vec<u8>, DocumentError> {
-    let parsed: serde_json::Value = serde_json::from_slice(document).map_err(|_| {
-        DocumentError::NotJson
-    })?;
-    let mut out = serde_json::Map::new();
-    for path in paths {
-        let mut node = Some(&parsed);
-        for segment in path.split('.') {
-            node = node.and_then(|n| n.get(segment));
-        }
-        // An absent path is omitted rather than nulled: absent and
-        // present-but-null are different answers.
-        let Some(value) = node else { continue };
-        let mut cursor = &mut out;
-        let mut keys = path.split('.').peekable();
-        while let Some(key) = keys.next() {
-            if keys.peek().is_none() {
-                cursor.insert(key.to_string(), value.clone());
-                break;
-            }
-            let entry = cursor
-                .entry(key.to_string())
-                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-            if !entry.is_object() {
-                *entry = serde_json::Value::Object(serde_json::Map::new());
-            }
-            cursor = entry.as_object_mut().expect("just ensured an object");
-        }
-    }
-    Ok(serde_json::Value::Object(out).to_string().into_bytes())
+    crate::projection::project(document, paths).map_err(|error| match error {
+        crate::projection::Error::NotJson => DocumentError::NotJson,
+        crate::projection::Error::InvalidPath => DocumentError::PathInvalid,
+        crate::projection::Error::TooDeep => DocumentError::PathTooDeep,
+        crate::projection::Error::UnsupportedPath => DocumentError::Unsupported(
+            "this transport projects only dot-separated object fields; array indexes and escaped field names are not implemented".to_string(),
+        ),
+    })
 }
 
 /// A plain read, shared by `get`, `get-and-touch` and `get-and-lock`.
@@ -545,7 +511,7 @@ impl DocumentGuest for Component {
         let paths: Vec<String> = options
             .as_ref()
             .and_then(|o| o.project.as_ref())
-            .map(|p| p.iter().filter(|p| !p.is_empty()).cloned().collect())
+            .cloned()
             .unwrap_or_default();
         let with_expiry = options.as_ref().is_some_and(|o| o.with_expiry);
         read(op::GET, id, Vec::new(), paths, with_expiry, options.and_then(|o| o.timeout_ns)).await
@@ -691,6 +657,27 @@ async fn query_service(
     binding: &Binding,
     body: Vec<u8>,
 ) -> Result<(u16, Vec<u8>), SqlppQueryError> {
+    within(binding.timeout_ms, query_service_inner(binding, body))
+        .await
+        .unwrap_or(Err(SqlppQueryError::Timeout))
+}
+
+fn query_transport_error(error: bindings::wasi::http::types::ErrorCode) -> SqlppQueryError {
+    use bindings::wasi::http::types::ErrorCode;
+    match error {
+        ErrorCode::DnsTimeout
+        | ErrorCode::ConnectionTimeout
+        | ErrorCode::ConnectionReadTimeout
+        | ErrorCode::ConnectionWriteTimeout
+        | ErrorCode::HttpResponseTimeout => SqlppQueryError::Timeout,
+        other => SqlppQueryError::RequestFailed(format!("{other:?}")),
+    }
+}
+
+async fn query_service_inner(
+    binding: &Binding,
+    body: Vec<u8>,
+) -> Result<(u16, Vec<u8>), SqlppQueryError> {
     use bindings::wasi::http::client;
     use bindings::wasi::http::types::{Fields, Method, Request, RequestOptions, Response, Scheme};
 
@@ -722,17 +709,23 @@ async fn query_service(
     let (request, _sent) = Request::new(fields, Some(rx), trailers_rx, Some(options));
     let _ = request.set_method(&Method::Post);
     let _ = request.set_scheme(Some(&Scheme::Http));
-    let _ = request.set_authority(Some(&format!("{}:{}", binding.host, binding.query_port)));
+    let _ = request.set_authority(Some(&binding.query_authority()));
     let _ = request.set_path_with_query(Some("/query/service"));
 
     let response = client::send(request)
         .await
-        .map_err(|e| SqlppQueryError::RequestFailed(format!("{e:?}")))?;
+        .map_err(query_transport_error)?;
     let status = response.get_status_code();
     let (res_tx, res_rx) = bindings::wit_future::new(|| Ok(()));
-    let (stream, _trailers) = Response::consume_body(response, res_rx);
-    let received = stream.collect().await;
-    drop(res_tx);
+    let (stream, trailers) = Response::consume_body(response, res_rx);
+    let received = transport::receive_body(
+        async move {
+            let received = stream.collect().await;
+            drop(res_tx);
+            received
+        },
+        trailers,
+    ).await.map_err(query_transport_error)?;
     Ok((status, received))
 }
 
@@ -832,31 +825,13 @@ impl SqlppGuest for Component {
         let body = serde_json::Value::Object(request).to_string().into_bytes();
 
         let (status, payload) = query_service(&binding, body).await?;
-        let parsed: serde_json::Value = serde_json::from_slice(&payload)
-            .map_err(|e| SqlppQueryError::Unexpected(format!("the query service did not answer JSON: {e}")))?;
-
-        // The query service reports failures in an `errors` array, under any
-        // status; its own code decides over the HTTP status.
-        if let Some(error) = parsed.get("errors").and_then(|e| e.as_array()).and_then(|e| e.first()) {
-            let message = error
-                .get("msg")
-                .and_then(|m| m.as_str())
-                .unwrap_or("the query failed")
-                .to_string();
-            return Err(match error.get("code").and_then(|c| c.as_u64()) {
-                Some(3000) => SqlppQueryError::InvalidArgument(message),
-                Some(12003) | Some(12021) => SqlppQueryError::InvalidArgument(format!(
-                    "the statement referenced a keyspace that does not exist: {message}"
-                )),
-                Some(13014) => SqlppQueryError::Unauthorized,
-                _ => SqlppQueryError::Server(format!("HTTP {status}: {message}")),
-            });
-        }
-
-        let rows = parsed
-            .get("results")
-            .cloned()
-            .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+        let rows = query::parse_response(status, &payload).map_err(|error| match error {
+            query::Failure::InvalidArgument(message) => SqlppQueryError::InvalidArgument(message),
+            query::Failure::Unauthorized => SqlppQueryError::Unauthorized,
+            query::Failure::Timeout => SqlppQueryError::Timeout,
+            query::Failure::Server(message) => SqlppQueryError::Server(message),
+            query::Failure::Unexpected(message) => SqlppQueryError::Unexpected(message),
+        })?;
         Ok(SqlppValue::Json(rows.to_string()))
     }
 }
