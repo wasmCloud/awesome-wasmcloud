@@ -11,6 +11,9 @@ import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { buildComponents } from './component-build.mjs';
+
+export { buildComponents };
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const GRPC = join(ROOT, 'components/grpc-client');
@@ -22,17 +25,6 @@ const GRPC_ARTIFACT = 'target/wasm32-wasip2/release/grpc_client.wasm';
 
 function run(command, args, options = {}) {
   return execFileSync(command, args, { encoding: 'utf8', timeout: 180_000, ...options })?.trim() ?? '';
-}
-
-export function buildComponents(projects, environment = process.env) {
-  // The fixture loads each project's configured local target path.
-  for (const project of projects) {
-    run('wash', ['build'], {
-      cwd: project,
-      env: { ...environment, CARGO_TARGET_DIR: resolve(project, 'target') },
-      stdio: 'inherit',
-    });
-  }
 }
 
 function request(port, path, { method = 'POST', body = Buffer.alloc(0), headers = {} } = {}) {

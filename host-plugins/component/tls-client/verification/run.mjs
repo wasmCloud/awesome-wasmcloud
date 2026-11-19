@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { buildComponents } from '../../../../tests/component-build.mjs';
 
 async function main() {
   const { values } = parseArgs({ options: {
@@ -41,11 +42,7 @@ async function main() {
   }
 
   if (!values['skip-build']) {
-    const buildEnvironment = { ...environment };
-    delete buildEnvironment.CARGO_TARGET_DIR;
-    for (const project of [root, join(root, 'verification/caller')]) {
-      execFileSync('wash', ['build'], { cwd: project, env: buildEnvironment, stdio: 'inherit' });
-    }
+    buildComponents([root, join(root, 'verification/caller')], environment);
   }
   const harness = await mkdtemp(join(tmpdir(), 'tls-client-verification-'));
   try {

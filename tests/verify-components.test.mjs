@@ -58,6 +58,36 @@ writeFileSync('offline.txt', process.env.CARGO_NET_OFFLINE || '');
   assert.equal(environment.CARGO_TARGET_DIR, shared, 'caller environment was mutated');
 });
 
+test('Cargo config cannot redirect component artifacts away from local targets', context => {
+  const directory = mkdtempSync(join(tmpdir(), 'component-cargo-config-test-'));
+  context.after(() => rmSync(directory, { recursive: true, force: true }));
+  const bin = join(directory, 'bin');
+  mkdirSync(bin);
+  // Use real Cargo configuration resolution with dependency-free native crates.
+  writeFileSync(join(bin, 'wash'), `#!/usr/bin/env node
+require('node:child_process').execFileSync('cargo', ['+1.96.0', 'build', '--quiet', '--offline'], { stdio: 'inherit' });
+`, { mode: 0o755 });
+  const configured = join(directory, 'configured-target');
+  const projects = ['plugin', 'caller'].map(name => {
+    const project = join(directory, name);
+    for (const child of ['.cargo', 'src', 'target/debug']) mkdirSync(join(project, child), { recursive: true });
+    writeFileSync(join(project, 'Cargo.toml'), '[package]\nname = "artifact_probe"\nversion = "0.1.0"\nedition = "2021"\n[workspace]\n');
+    writeFileSync(join(project, '.cargo/config.toml'), `[build]\ntarget-dir = ${JSON.stringify(configured)}\n`);
+    writeFileSync(join(project, 'src/main.rs'), `fn main() { std::hint::black_box(b"current-${name}"); }\n`);
+    writeFileSync(join(project, 'target/debug/artifact_probe'), 'stale');
+    return project;
+  });
+  const environment = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
+  delete environment.CARGO_TARGET_DIR;
+  buildComponents(projects, environment);
+  for (const [index, project] of projects.entries()) {
+    const artifact = readFileSync(join(project, 'target/debug/artifact_probe'));
+    assert(artifact.includes(`current-${['plugin', 'caller'][index]}`), 'local artifact stayed stale');
+  }
+  assert(!existsSync(configured), 'Cargo config redirected the build output');
+  assert.equal(environment.CARGO_TARGET_DIR, undefined, 'caller environment was mutated');
+});
+
 test('raw uploads read a fragmented status line including a split CRLF', async context => {
   const port = await peer(context, socket => {
     socket.write('HTTP/1.1');
