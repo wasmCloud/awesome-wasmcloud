@@ -24,7 +24,7 @@
 //! Nothing here knows about protobuf. Encode a message with `prost` (or by
 //! hand) and hand the bytes over; decode what comes back the same way.
 
-use crate::{bindings, deadline, protocol};
+use crate::{bindings, deadline, protocol, transport};
 use bindings::wasi::clocks::monotonic_clock;
 use bindings::wasi::http::client;
 use bindings::wasi::http::types::{Fields, Method, Request, RequestOptions, Response, Scheme};
@@ -68,8 +68,6 @@ impl Reply {
     }
 }
 
-pub use protocol::split_frames;
-
 /// Send one unary gRPC call.
 pub async fn unary(call: Call<'_>) -> Result<Reply, String> {
     match call.timeout_ns {
@@ -82,7 +80,12 @@ pub async fn unary(call: Call<'_>) -> Result<Reply, String> {
 }
 
 async fn unary_inner(call: Call<'_>) -> Result<Reply, String> {
-    let body = protocol::frame(&call.message)?;
+    if call.message.len() > protocol::MAX_MESSAGE_BYTES {
+        return Err("gRPC message exceeds the 4 MiB message limit".into());
+    }
+    let length = call.message.len() as u32;
+    let mut prefix = vec![0];
+    prefix.extend_from_slice(&length.to_be_bytes());
 
     let fields = Fields::new();
     let set = |name: &str, value: &[u8]| -> Result<(), String> {
@@ -97,7 +100,10 @@ async fn unary_inner(call: Call<'_>) -> Result<Reply, String> {
     // A `wasi:http` body is a stream, so without an explicit length the
     // request goes out chunked. Some proxies handle a chunked gRPC request
     // poorly.
-    set("content-length", body.len().to_string().as_bytes())?;
+    set(
+        "content-length",
+        (call.message.len() + 5).to_string().as_bytes(),
+    )?;
     if let Some(ns) = call.timeout_ns {
         set("grpc-timeout", protocol::timeout_header(ns).as_bytes())?;
     }
@@ -108,7 +114,9 @@ async fn unary_inner(call: Call<'_>) -> Result<Reply, String> {
     let (trailers_tx, trailers_rx) = bindings::wit_future::new(|| Ok(None));
     let (mut tx, rx) = bindings::wit_stream::new();
     wit_bindgen::spawn_local(async move {
-        tx.write_all(body).await;
+        if tx.write_all(prefix).await.is_empty() {
+            tx.write_all(call.message).await;
+        }
         drop(tx);
         // The request carries no trailers of its own; the future still has to
         // resolve or the request body never completes.
@@ -150,8 +158,17 @@ async fn unary_inner(call: Call<'_>) -> Result<Reply, String> {
     let headers = response.get_headers().copy_all();
 
     let (res_tx, res_rx) = bindings::wit_future::new(|| Ok(()));
-    let (body_stream, trailers) = Response::consume_body(response, res_rx);
-    let received = body_stream.collect().await;
+    let (mut body_stream, trailers) = Response::consume_body(response, res_rx);
+    let mut decoder = protocol::FrameDecoder::default();
+    loop {
+        let (_, chunk) = body_stream
+            .read(Vec::with_capacity(transport::READ_CHUNK_BYTES))
+            .await;
+        if chunk.is_empty() {
+            break;
+        }
+        decoder.push(&chunk)?;
+    }
     drop(res_tx);
     // This future also carries body transport failures, even when a
     // trailers-only gRPC status was already present in the response headers.
@@ -160,12 +177,13 @@ async fn unary_inner(call: Call<'_>) -> Result<Reply, String> {
         .map_err(|e| format!("response body error: {e:?}"))?;
 
     let trailers = trailing.map(|fields| fields.copy_all()).unwrap_or_default();
+    let frames = decoder.finish()?;
     let (status, message) =
-        protocol::response_status(http_status, &headers, &trailers, !received.is_empty())?;
+        protocol::response_status(http_status, &headers, &trailers, !frames.is_empty())?;
     Ok(Reply {
         http_status,
         status: Some(status),
         message,
-        frames: split_frames(&received)?,
+        frames,
     })
 }

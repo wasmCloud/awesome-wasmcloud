@@ -169,7 +169,6 @@ impl Reply {
     }
 }
 
-
 fn to_document_error(failure: Failure) -> DocumentError {
     match failure {
         Failure::NotFound => DocumentError::NotFound,
@@ -330,15 +329,23 @@ async fn send_inner(
     let headers = response.get_headers().copy_all();
 
     let (res_tx, res_rx) = bindings::wit_future::new(|| Ok(()));
-    let (body_stream, trailers) = Response::consume_body(response, res_rx);
+    let (mut body_stream, trailers) = Response::consume_body(response, res_rx);
     let body = transport::receive_body(
         async move {
-            let body = body_stream.collect().await;
+            let body = transport::read_bounded(
+                async |capacity| body_stream.read(Vec::with_capacity(capacity)).await.1,
+                transport::MAX_HTTP_BODY_BYTES,
+            )
+            .await
+            .map_err(|_| {
+                DocumentError::RequestFailed("HTTP response exceeds the 32 MiB body limit".into())
+            })?;
             drop(res_tx);
-            body
+            Ok(body)
         },
-        trailers,
-    ).await.map_err(transport_error)?;
+        async move { trailers.await.map_err(transport_error) },
+    )
+    .await?;
 
     Ok(Reply {
         status,
@@ -348,9 +355,9 @@ async fn send_inner(
 }
 
 fn set_header(fields: &Fields, name: &str, value: &str) -> Result<(), DocumentError> {
-    fields.append(name, value.as_bytes()).map_err(|e| {
-        DocumentError::InvalidArgument(format!("header `{name}` was rejected: {e:?}"))
-    })
+    fields
+        .append(name, value.as_bytes())
+        .map_err(|e| DocumentError::InvalidArgument(format!("header `{name}` was rejected: {e:?}")))
 }
 
 /// Map a `wasi:http` transport failure onto the interface's error model.
@@ -461,7 +468,6 @@ fn write_headers(
     }
     Ok(headers)
 }
-
 
 /// Reject option fields whose silent omission would change what gets stored or
 /// what guarantee the caller believes they have.
@@ -576,11 +582,9 @@ impl DocumentGuest for Component {
         options: Option<DocumentInsertOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
         let binding = caller_binding()?;
-        let (expires, level) = options
-            .as_ref()
-            .map_or((0, DurabilityLevel::Unknown), |o| {
-                (o.expires_in_ns, o.durability_level)
-            });
+        let (expires, level) = options.as_ref().map_or((0, DurabilityLevel::Unknown), |o| {
+            (o.expires_in_ns, o.durability_level)
+        });
         if let Some(o) = options.as_ref() {
             reject_unhonoured_write_options(false, o.persist_to, o.replicate_to)?;
         }
@@ -611,7 +615,8 @@ impl DocumentGuest for Component {
             reject_unhonoured_write_options(o.preserve_expiry, o.persist_to, o.replicate_to)?;
         }
         let binding = binding.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
-        let mut headers = write_headers(cas, expires, level, options.as_ref().and_then(|o| o.flags))?;
+        let mut headers =
+            write_headers(cas, expires, level, options.as_ref().and_then(|o| o.flags))?;
         // `replace` requires the document to exist. With no caller CAS to
         // condition on, the RFC 7232 wildcard asks the cluster to reject the
         // write when nothing is there, which is what keeps `replace` from
@@ -622,14 +627,7 @@ impl DocumentGuest for Component {
             headers.push(("if-match", "*".to_string()));
         }
         let path = document_path(&binding, &id)?;
-        write(
-            &binding,
-            Method::Put,
-            path,
-            headers,
-            Some(doc),
-        )
-        .await
+        write(&binding, Method::Put, path, headers, Some(doc)).await
     }
 
     async fn upsert(
@@ -638,11 +636,9 @@ impl DocumentGuest for Component {
         options: Option<DocumentUpsertOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
         let binding = caller_binding()?;
-        let (expires, level) = options
-            .as_ref()
-            .map_or((0, DurabilityLevel::Unknown), |o| {
-                (o.expires_in_ns, o.durability_level)
-            });
+        let (expires, level) = options.as_ref().map_or((0, DurabilityLevel::Unknown), |o| {
+            (o.expires_in_ns, o.durability_level)
+        });
         if let Some(o) = options.as_ref() {
             reject_unhonoured_write_options(o.preserve_expiry, o.persist_to, o.replicate_to)?;
         }
@@ -695,18 +691,14 @@ impl DocumentGuest for Component {
         read(&binding, &path).await
     }
 
-
-
-
-
     async fn remove(
         id: String,
         options: Option<DocumentRemoveOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
         let binding = caller_binding()?;
-        let (cas, level) = options
-            .as_ref()
-            .map_or((0, DurabilityLevel::Unknown), |o| (o.cas, o.durability_level));
+        let (cas, level) = options.as_ref().map_or((0, DurabilityLevel::Unknown), |o| {
+            (o.cas, o.durability_level)
+        });
         if let Some(o) = options.as_ref() {
             reject_unhonoured_write_options(false, o.persist_to, o.replicate_to)?;
         }
@@ -720,8 +712,6 @@ impl DocumentGuest for Component {
         let path = document_path(&binding, &id)?;
         write(&binding, Method::Delete, path, headers, None).await
     }
-
-
 
     /// Lock the document and return it. The CAS in the result is the lock's:
     /// only that value unlocks it, and only it writes through the lock.
@@ -738,7 +728,10 @@ impl DocumentGuest for Component {
         let seconds = if lock_time == 0 {
             DEFAULT_LOCK_SECONDS
         } else {
-            lock_time.div_ceil(1_000_000_000).max(1).min(u32::MAX.into()) as u32
+            lock_time
+                .div_ceil(1_000_000_000)
+                .max(1)
+                .min(u32::MAX.into()) as u32
         };
 
         let path = format!("{}/lock", document_alpha_path(&binding, &id)?);
@@ -767,7 +760,10 @@ impl DocumentGuest for Component {
     ///
     /// A CAS that is not the lock's is `cas-mismatch`; an unlocked document is
     /// `not-locked`.
-    async fn unlock(id: String, options: Option<DocumentUnlockOptions>) -> Result<(), DocumentError> {
+    async fn unlock(
+        id: String,
+        options: Option<DocumentUnlockOptions>,
+    ) -> Result<(), DocumentError> {
         let binding = caller_binding()?;
         let cas = options.as_ref().map_or(0, |o| o.cas);
         if cas == 0 {
@@ -875,8 +871,8 @@ fn touch_body(expires_in_ns: u64, return_content: bool) -> Result<Vec<u8>, Docum
         ));
     }
     let now = system_clock::now();
-    let seconds = api::expiry_seconds(expires_in_ns, now.seconds)
-        .map_err(DocumentError::InvalidArgument)?;
+    let seconds =
+        api::expiry_seconds(expires_in_ns, now.seconds).map_err(DocumentError::InvalidArgument)?;
     // The touch endpoint takes an absolute instant, so a relative TTL has to be
     // added to the wall clock here.
     let expires_at = now.seconds + i64::from(seconds);
@@ -919,14 +915,12 @@ impl SqlppGuest for Component {
             for (index, param) in params.iter().enumerate() {
                 args.push(match param {
                     SqlppValue::Null => serde_json::Value::Null,
-                    SqlppValue::Json(text) => {
-                        serde_json::from_str(text).map_err(|e| {
-                            SqlppQueryError::InvalidArgument(format!(
-                                "positional parameter {} is not valid JSON: {e}",
-                                index + 1
-                            ))
-                        })?
-                    }
+                    SqlppValue::Json(text) => serde_json::from_str(text).map_err(|e| {
+                        SqlppQueryError::InvalidArgument(format!(
+                            "positional parameter {} is not valid JSON: {e}",
+                            index + 1
+                        ))
+                    })?,
                 });
             }
             request.insert("args".to_string(), serde_json::Value::Array(args));
@@ -995,7 +989,10 @@ impl SqlppGuest for Component {
             };
             request.insert("scan_consistency".to_string(), consistency.into());
             request.insert("readonly".to_string(), options.readonly.into());
-            request.insert("preserve_expiry".to_string(), options.preserve_expiry.into());
+            request.insert(
+                "preserve_expiry".to_string(),
+                options.preserve_expiry.into(),
+            );
             request.insert("metrics".to_string(), options.metrics.into());
             if let Some(id) = options.client_context_id.as_ref() {
                 request.insert("client_context_id".to_string(), id.clone().into());

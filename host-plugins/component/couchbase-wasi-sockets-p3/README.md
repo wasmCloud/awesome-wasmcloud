@@ -12,6 +12,10 @@ The interface is not copied. [`.wash/config.yaml`](.wash/config.yaml) resolves
 `wasmcloud:couchbase` from `../couchbase/interface`, so this plugin and the
 Data API plugin cannot drift.
 
+SQL++ HTTP replies are read incrementally with backpressure and a 32 MiB body limit.
+The reader also checks transport completion before returning a query result.
+KV replies retain their separate 32 MiB framing limit.
+
 **Status: working.** 40/40 on the
 [shared verification scenario](../couchbase/verification/), the same score as
 the Data API plugin, against a real cluster. Also run as a host plugin on a wasmCloud

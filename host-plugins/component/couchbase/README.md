@@ -9,6 +9,12 @@ sandbox and reaches Couchbase over the [Capella Data API](https://docs.couchbase
 HTTPS surface through `wasi:http/client@0.3.0` rather than over the binary KV
 protocol.
 
+HTTP bodies are read incrementally with backpressure and a 32 MiB limit,
+including chunked replies.
+The WIT interface returns complete documents and query results,
+so the bounded body is retained until the transport completion check succeeds.
+Oversized replies fail explicitly before JSON decoding or returning partial data.
+
 > **Status: experimental, but exercised end to end.** It has been run in a real
 > wasmCloud host against live Capella, and — reproducibly, with no cloud account
 > — against a self-hosted cluster fronted by Couchbase's **Cloud Native

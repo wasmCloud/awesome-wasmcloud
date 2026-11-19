@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 use std::future::Future;
 
 use crate::bindings;
-use crate::conn::Connection;
 use crate::config::{Binding, ConnectionKey};
+use crate::conn::Connection;
 use crate::lifecycle::State;
 use crate::proto::{self, op, status};
 use crate::query;
@@ -148,7 +148,9 @@ async fn binding_config_secrets(iface: &InterfaceBinding) -> Result<Vec<(String,
         match reveal(&secret).await {
             SecretValue::String(value) => revealed.push((key, value)),
             SecretValue::Bytes(_) => {
-                return Err(format!("secret `{key}` is binary, and config values are text"))
+                return Err(format!(
+                    "secret `{key}` is binary, and config values are text"
+                ))
             }
         }
     }
@@ -346,12 +348,12 @@ fn reject_preserve_expiry(preserve: bool) -> Result<(), DocumentError> {
 fn reject_replica(level: Option<ReplicaReadLevel>) -> Result<(), DocumentError> {
     match level {
         Some(ReplicaReadLevel::On) => Err(DocumentError::Unsupported(
-            "this plugin reads only the active copy; it does not track the replica topology".to_string(),
+            "this plugin reads only the active copy; it does not track the replica topology"
+                .to_string(),
         )),
         _ => Ok(()),
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // document
@@ -368,8 +370,10 @@ async fn store(
     timeout_ns: Option<u64>,
 ) -> Result<MutationMetadata, DocumentError> {
     let binding = caller_binding()?.with_timeout_ns(timeout_ns);
-    let extras =
-        proto::store_extras(flags.unwrap_or(proto::JSON_FLAGS), expiry_seconds(expires_in_ns)?);
+    let extras = proto::store_extras(
+        flags.unwrap_or(proto::JSON_FLAGS),
+        expiry_seconds(expires_in_ns)?,
+    );
     let b = binding.clone();
     with_connection(&binding, async move |conn| {
         let vbucket = conn.vbucket_for(&id);
@@ -491,8 +495,19 @@ impl DocumentGuest for Component {
         if let Some(o) = options.as_ref() {
             reject_unhonoured(o.persist_to, o.replicate_to, o.durability_level)?;
         }
-        let (flags, expires) = options.as_ref().map_or((None, 0), |o| (o.flags, o.expires_in_ns));
-        store(op::ADD, id, document, flags, expires, 0, options.and_then(|o| o.timeout_ns)).await
+        let (flags, expires) = options
+            .as_ref()
+            .map_or((None, 0), |o| (o.flags, o.expires_in_ns));
+        store(
+            op::ADD,
+            id,
+            document,
+            flags,
+            expires,
+            0,
+            options.and_then(|o| o.timeout_ns),
+        )
+        .await
     }
 
     async fn upsert(
@@ -504,8 +519,19 @@ impl DocumentGuest for Component {
             reject_unhonoured(o.persist_to, o.replicate_to, o.durability_level)?;
             reject_preserve_expiry(o.preserve_expiry)?;
         }
-        let (flags, expires) = options.as_ref().map_or((None, 0), |o| (o.flags, o.expires_in_ns));
-        store(op::SET, id, document, flags, expires, 0, options.and_then(|o| o.timeout_ns)).await
+        let (flags, expires) = options
+            .as_ref()
+            .map_or((None, 0), |o| (o.flags, o.expires_in_ns));
+        store(
+            op::SET,
+            id,
+            document,
+            flags,
+            expires,
+            0,
+            options.and_then(|o| o.timeout_ns),
+        )
+        .await
     }
 
     async fn replace(
@@ -517,9 +543,19 @@ impl DocumentGuest for Component {
             reject_unhonoured(o.persist_to, o.replicate_to, o.durability_level)?;
             reject_preserve_expiry(o.preserve_expiry)?;
         }
-        let (flags, expires, cas) =
-            options.as_ref().map_or((None, 0, 0), |o| (o.flags, o.expires_in_ns, o.cas));
-        store(op::REPLACE, id, document, flags, expires, cas, options.and_then(|o| o.timeout_ns)).await
+        let (flags, expires, cas) = options
+            .as_ref()
+            .map_or((None, 0, 0), |o| (o.flags, o.expires_in_ns, o.cas));
+        store(
+            op::REPLACE,
+            id,
+            document,
+            flags,
+            expires,
+            cas,
+            options.and_then(|o| o.timeout_ns),
+        )
+        .await
     }
 
     async fn get(
@@ -533,14 +569,23 @@ impl DocumentGuest for Component {
             .cloned()
             .unwrap_or_default();
         let with_expiry = options.as_ref().is_some_and(|o| o.with_expiry);
-        read(op::GET, id, Vec::new(), paths, with_expiry, options.and_then(|o| o.timeout_ns)).await
+        read(
+            op::GET,
+            id,
+            Vec::new(),
+            paths,
+            with_expiry,
+            options.and_then(|o| o.timeout_ns),
+        )
+        .await
     }
 
     async fn remove(
         id: String,
         options: Option<DocumentRemoveOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
-        let binding = caller_binding()?.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
+        let binding =
+            caller_binding()?.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
         if let Some(o) = options.as_ref() {
             reject_unhonoured(o.persist_to, o.replicate_to, o.durability_level)?;
         }
@@ -565,7 +610,8 @@ impl DocumentGuest for Component {
         id: String,
         options: Option<DocumentTouchOptions>,
     ) -> Result<MutationMetadata, DocumentError> {
-        let binding = caller_binding()?.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
+        let binding =
+            caller_binding()?.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
         let seconds = expiry_seconds(options.as_ref().map_or(0, |o| o.expires_in))?;
         if seconds == 0 {
             return Err(DocumentError::InvalidArgument(
@@ -599,7 +645,15 @@ impl DocumentGuest for Component {
             ));
         }
         let timeout_ns = options.and_then(|o| o.timeout_ns);
-        read(op::GET_AND_TOUCH, id, seconds.to_be_bytes().to_vec(), Vec::new(), false, timeout_ns).await
+        read(
+            op::GET_AND_TOUCH,
+            id,
+            seconds.to_be_bytes().to_vec(),
+            Vec::new(),
+            false,
+            timeout_ns,
+        )
+        .await
     }
 
     async fn get_and_lock(
@@ -614,14 +668,23 @@ impl DocumentGuest for Component {
             })?,
         };
         let timeout_ns = options.and_then(|o| o.timeout_ns);
-        read(op::GET_AND_LOCK, id, seconds.to_be_bytes().to_vec(), Vec::new(), false, timeout_ns).await
+        read(
+            op::GET_AND_LOCK,
+            id,
+            seconds.to_be_bytes().to_vec(),
+            Vec::new(),
+            false,
+            timeout_ns,
+        )
+        .await
     }
 
     async fn unlock(
         id: String,
         options: Option<DocumentUnlockOptions>,
     ) -> Result<(), DocumentError> {
-        let binding = caller_binding()?.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
+        let binding =
+            caller_binding()?.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
         let cas = options.as_ref().map_or(0, |o| o.cas);
         if cas == 0 {
             return Err(DocumentError::InvalidArgument(
@@ -664,7 +727,6 @@ impl DocumentGuest for Component {
         ))
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // sqlpp
@@ -731,20 +793,26 @@ async fn query_service_inner(
     let _ = request.set_authority(Some(&binding.query_authority()));
     let _ = request.set_path_with_query(Some("/query/service"));
 
-    let response = client::send(request)
-        .await
-        .map_err(query_transport_error)?;
+    let response = client::send(request).await.map_err(query_transport_error)?;
     let status = response.get_status_code();
     let (res_tx, res_rx) = bindings::wit_future::new(|| Ok(()));
-    let (stream, trailers) = Response::consume_body(response, res_rx);
+    let (mut stream, trailers) = Response::consume_body(response, res_rx);
     let received = transport::receive_body(
         async move {
-            let received = stream.collect().await;
+            let received = transport::read_bounded(
+                async |capacity| stream.read(Vec::with_capacity(capacity)).await.1,
+                transport::MAX_HTTP_BODY_BYTES,
+            )
+            .await
+            .map_err(|_| {
+                SqlppQueryError::RequestFailed("HTTP response exceeds the 32 MiB body limit".into())
+            })?;
             drop(res_tx);
-            received
+            Ok(received)
         },
-        trailers,
-    ).await.map_err(query_transport_error)?;
+        async move { trailers.await.map_err(query_transport_error) },
+    )
+    .await?;
     Ok((status, received))
 }
 
@@ -753,12 +821,24 @@ fn base64(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         out.push(TABLE[(n >> 18) as usize & 63] as char);
         out.push(TABLE[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -802,7 +882,10 @@ impl SqlppGuest for Component {
         if let Some(options) = options.as_ref() {
             use bindings::exports::wasmcloud::couchbase::types::QueryScanConsistency as Wit;
             request.insert("readonly".to_string(), options.readonly.into());
-            request.insert("preserve_expiry".to_string(), options.preserve_expiry.into());
+            request.insert(
+                "preserve_expiry".to_string(),
+                options.preserve_expiry.into(),
+            );
 
             // `consistent-with` implies `at_plus`, matching how the SDKs treat
             // it, so it overrides whatever scan-consistency was also set.
@@ -829,7 +912,10 @@ impl SqlppGuest for Component {
                 let mut buckets = serde_json::Map::new();
                 buckets.insert(binding.bucket.clone(), vector);
                 request.insert("scan_consistency".to_string(), "at_plus".into());
-                request.insert("scan_vectors".to_string(), serde_json::Value::Object(buckets));
+                request.insert(
+                    "scan_vectors".to_string(),
+                    serde_json::Value::Object(buckets),
+                );
             } else {
                 request.insert(
                     "scan_consistency".to_string(),

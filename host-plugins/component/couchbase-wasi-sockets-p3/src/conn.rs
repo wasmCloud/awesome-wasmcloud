@@ -32,7 +32,6 @@ pub struct Connection {
 pub struct Reply {
     pub header: ResponseHeader,
     pub extras: Vec<u8>,
-    pub key: Vec<u8>,
     pub value: Vec<u8>,
 }
 
@@ -94,20 +93,39 @@ impl Connection {
         // HELLO. A server that declines COLLECTIONS would need bare keys, and
         // this implementation only speaks the prefixed form.
         let hello = conn
-            .call(op::HELLO, 0, b"wasmcloud-couchbase", &[], &proto::hello_features(), 0)
+            .call(
+                op::HELLO,
+                0,
+                b"wasmcloud-couchbase",
+                &[],
+                &proto::hello_features(),
+                0,
+            )
             .await?;
         if !hello.ok() {
-            return Err(format!("HELLO refused: status 0x{:04x}", hello.header.status));
+            return Err(format!(
+                "HELLO refused: status 0x{:04x}",
+                hello.header.status
+            ));
         }
         let agreed = proto::parse_hello_response(&hello.value);
         if !agreed.contains(&proto::feature::COLLECTIONS) {
-            return Err("the cluster did not agree to COLLECTIONS, which this plugin requires".to_string());
+            return Err(
+                "the cluster did not agree to COLLECTIONS, which this plugin requires".to_string(),
+            );
         }
 
         // SASL PLAIN. The mechanism list is not consulted: PLAIN is the only
         // one implemented, and a server that refuses it says so here.
         let auth = conn
-            .call(op::SASL_AUTH, 0, b"PLAIN", &[], &proto::sasl_plain(username, password), 0)
+            .call(
+                op::SASL_AUTH,
+                0,
+                b"PLAIN",
+                &[],
+                &proto::sasl_plain(username, password),
+                0,
+            )
             .await?;
         if !auth.ok() {
             return Err(match auth.header.status {
@@ -116,7 +134,9 @@ impl Connection {
             });
         }
 
-        let selected = conn.call(op::SELECT_BUCKET, 0, bucket.as_bytes(), &[], &[], 0).await?;
+        let selected = conn
+            .call(op::SELECT_BUCKET, 0, bucket.as_bytes(), &[], &[], 0)
+            .await?;
         if !selected.ok() {
             return Err(match selected.header.status {
                 // The server answers the same for a bucket that does not exist,
@@ -129,7 +149,9 @@ impl Connection {
         }
 
         // Routing needs the vbucket count, which only the cluster config has.
-        let config = conn.call(op::GET_CLUSTER_CONFIG, 0, &[], &[], &[], 0).await?;
+        let config = conn
+            .call(op::GET_CLUSTER_CONFIG, 0, &[], &[], &[], 0)
+            .await?;
         if !config.ok() {
             return Err(format!(
                 "could not read the cluster config: status 0x{:04x}",
@@ -140,7 +162,9 @@ impl Connection {
 
         // The collection id turns a scope/collection name into the key prefix.
         let path = format!("{scope}.{collection}");
-        let cid = conn.call(op::GET_COLLECTION_ID, 0, path.as_bytes(), &[], &[], 0).await?;
+        let cid = conn
+            .call(op::GET_COLLECTION_ID, 0, path.as_bytes(), &[], &[], 0)
+            .await?;
         if !cid.ok() {
             return Err(match cid.header.status {
                 status::UNKNOWN_COLLECTION => format!("no such scope or collection: `{path}`"),
@@ -174,7 +198,10 @@ impl Connection {
         let head = self.read_exactly(proto::HEADER_LEN).await?;
         let header = ResponseHeader::parse(&head)?;
         if header.opcode != opcode {
-            return Err(format!("response opcode 0x{:02x} does not match 0x{opcode:02x}", header.opcode));
+            return Err(format!(
+                "response opcode 0x{:02x} does not match 0x{opcode:02x}",
+                header.opcode
+            ));
         }
         let body = self.read_exactly(header.body_len).await?;
 
@@ -190,7 +217,6 @@ impl Connection {
         let value_at = header.value_offset();
         Ok(Reply {
             extras: body[..header.extras_len].to_vec(),
-            key: body[header.extras_len..value_at].to_vec(),
             value: body[value_at..].to_vec(),
             header,
         })

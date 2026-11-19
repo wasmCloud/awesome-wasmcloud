@@ -11,7 +11,7 @@
 //! Layout: everything that can be reasoned about without the WIT bindings lives
 //! in [`api`], [`config`], [`mutation`] and [`timefmt`], which compile and test
 //! on the host.
-//! [`plugin`] is the bindings glue and is compiled only for wasm.
+//! `plugin` is the bindings glue and is compiled only for wasm.
 
 pub mod api;
 pub mod config;

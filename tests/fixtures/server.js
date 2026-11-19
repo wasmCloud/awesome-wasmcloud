@@ -3,11 +3,27 @@ const http = require('node:http');
 const http2 = require('node:http2');
 const net = require('node:net');
 const fs = require('node:fs');
+const { once } = require('node:events');
 const requests = [];
 const frame = value => {
   const data = Buffer.from(value); const header = Buffer.alloc(5);
   header.writeUInt32BE(data.length, 1); return Buffer.concat([header, data]);
 };
+// Respect backpressure and stop allocating/writing as soon as the client aborts.
+async function writeChunks(output, chunk, count) {
+  const controller = new AbortController();
+  const closed = () => controller.abort();
+  output.once('close', closed);
+  try {
+    for (let index = 0; index < count && !output.destroyed; index++) {
+      if (!output.write(chunk)) {
+        await once(output, 'drain', { signal: controller.signal });
+      }
+    }
+    if (!output.destroyed) output.end();
+  } catch { /* Oversized replies are expected to be cancelled by the client. */ }
+  finally { output.removeListener('close', closed); }
+}
 function grpc(stream, headers) {
   requests.push({method: headers[':method'], path: headers[':path'],
     timeout: headers['grpc-timeout'], authorization: headers.authorization});
@@ -23,6 +39,19 @@ function grpc(stream, headers) {
   stream.respond(responseHeaders, {waitForTrailers: true});
   stream.on('wantTrailers', () => stream.sendTrailers(mode === 'MissingStatus' ? {} :
     {'grpc-status': mode === 'InvalidStatus' ? '00' : mode === 'ConflictingStatus' ? '13' : '0'}));
+  if (mode === 'HugeFrame') {
+    const header = Buffer.alloc(5);
+    header.writeUInt32BE(4 * 1024 * 1024 + 1, 1);
+    stream.write(header);
+    const timer = setTimeout(() => stream.end(), 10_000);
+    stream.once('close', () => clearTimeout(timer));
+    return;
+  }
+  if (mode === 'HugeBody') {
+    void writeChunks(stream, frame(Buffer.alloc(4 * 1024 * 1024)), 9);
+    return;
+  }
+  if (mode === 'FrameFlood') { stream.end(Buffer.alloc(5 * 1025)); return; }
   const values = {
     Empty: frame([]), Stream: Buffer.concat([frame('one'), frame('two')]),
     Malformed: Buffer.from([0, 0, 0, 0, 5, 10, 0]), ShortHeader: Buffer.from([0, 0]),
@@ -57,6 +86,9 @@ http.createServer((req, res) => {
       if (data.statement === 'SELECT RAW "query-context"') {
         res.writeHead(200, {'content-type': 'application/json'});
         res.end(JSON.stringify({results: [data.query_context], status: 'success'}));
+      } else if (data.statement === 'SELECT RAW "query-oversized"') {
+        res.writeHead(200, {'content-type': 'application/json'});
+        void writeChunks(res, Buffer.alloc(64 * 1024, 'x'), 33 * 16);
       } else if (['SELECT RAW "query-timeout"', 'SELECT RAW "query-timeout-http"'].includes(data.statement)) {
         res.writeHead(data.statement.includes('timeout-http') ? 500 : 200,
           {'content-type': 'application/json'});
@@ -68,6 +100,11 @@ http.createServer((req, res) => {
     }); return;
   }
   req.resume();
+  if (mode === 'oversized') {
+    res.writeHead(200, {'content-type': 'application/octet-stream'});
+    void writeChunks(res, Buffer.alloc(64 * 1024, 'x'), 33 * 16);
+    return;
+  }
   res.writeHead(200, {'content-type': 'application/octet-stream',
     'content-length': 10, etag: '1234567890abcdef'});
   if (mode === 'complete') res.end('abcdefghij');

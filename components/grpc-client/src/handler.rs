@@ -1,4 +1,5 @@
-use crate::{bindings, grpc};
+use crate::{bindings, deadline, grpc, protocol, transport};
+use bindings::wasi::clocks::monotonic_clock;
 
 use bindings::exports::wasi::http::handler::Guest as Handler;
 use bindings::wasi::cli::environment;
@@ -59,6 +60,7 @@ async fn handle(request: Request) -> Response {
             _ => return text(500, "GRPC_TIMEOUT_MS must be a positive integer\n".into()),
         },
     };
+    let deadline_at = monotonic_clock::now().saturating_add(timeout_ns);
 
     let path = request.get_path_with_query().unwrap_or_default();
     // A gRPC method path is `/package.Service/Method`: two segments, no query.
@@ -88,12 +90,30 @@ async fn handle(request: Request) -> Response {
     }
 
     let (req_tx, req_rx) = bindings::wit_future::new(|| Ok(()));
-    let (body_stream, trailers) = Request::consume_body(request, req_rx);
-    let message = body_stream.collect().await;
-    drop(req_tx);
-    if let Err(error) = trailers.await {
-        return text(400, format!("request body error: {error:?}\n"));
-    }
+    let (mut body_stream, trailers) = Request::consume_body(request, req_rx);
+    let upload = async move {
+        let message = transport::read_bounded(
+            async |capacity| body_stream.read(Vec::with_capacity(capacity)).await.1,
+            protocol::MAX_MESSAGE_BYTES,
+        )
+        .await
+        .map_err(|_| text(413, "request exceeds the 4 MiB message limit\n".into()))?;
+        drop(req_tx);
+        trailers
+            .await
+            .map_err(|error| text(400, format!("request body error: {error:?}\n")))?;
+        Ok::<_, Response>(message)
+    };
+    let message = match deadline::within(
+        upload,
+        monotonic_clock::wait_for(deadline_at.saturating_sub(monotonic_clock::now())),
+    )
+    .await
+    {
+        Some(Ok(message)) => message,
+        Some(Err(response)) => return response,
+        None => return text(408, "request upload deadline exceeded\n".into()),
+    };
 
     let reply = match grpc::unary(grpc::Call {
         authority: &authority,
@@ -101,7 +121,7 @@ async fn handle(request: Request) -> Response {
         path: &path,
         message,
         headers,
-        timeout_ns: Some(timeout_ns),
+        timeout_ns: Some(deadline_at.saturating_sub(monotonic_clock::now())),
     })
     .await
     {

@@ -4,11 +4,11 @@
 //! No SDK and no gateway: the protocol is implemented here, and every socket
 //! operation is an `await` that yields to the component executor.
 //!
-//! [`proto`] is bindings-free and tests on the host; [`conn`] and [`plugin`]
+//! [`proto`] is bindings-free and tests on the host; `conn` and `plugin`
 //! are the bindings glue and compile only for wasm.
 
-pub mod proto;
 pub mod projection;
+pub mod proto;
 
 #[path = "../../couchbase/src/query.rs"]
 pub mod query;
