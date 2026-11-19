@@ -6,10 +6,11 @@ workload invokes `example:tls/client.ping`; the plugin completes a verified TLS
 handshake, sends `PING\r\n`, and returns the echo peer's reply.
 
 **Status: experimental reference example.** The components build with `wash`
-2.7.0 and Rust 1.96, targeting `wasm32-wasip2`. The verifier uses wasmCloud
-source revision `86e98479cf8336f563e68f66d6ee6c0b8924b2c9` (2.12.2), Wasmtime
-48.0.8, and the included [runtime compatibility patch](verification/runtime.patch).
-The TLS WIT is a draft, pinned locally to the host implementation.
+2.7.0, targeting `wasm32-wasip2`; CI uses stable Rust. The verifier uses wasmCloud
+source revision `e764379bc2677198a335dc7ff58dc9e0bda0f1e3`, which includes
+the merged TLS support, and Wasmtime 48.0.10 from the verifier lockfile.
+The TLS WIT is a draft, shared at the repository's top level in
+[`wit-deps`](../../../wit-deps/README.md) to match the host implementation.
 
 ## How it works
 
@@ -51,16 +52,18 @@ check for a missing `close_notify`.
 ## Host requirements and certificate trust
 
 The host needs both `host-component-plugins` and `wasi-tls` enabled.
-On the tested source revision, two runtime changes are also required:
+It must include the TLS fixes merged in
+[wasmCloud PR #6014](https://github.com/wasmCloud/wasmCloud/pull/6014):
 
 - Classify the linked TLS draft as a host builtin, so the component-plugin
   loader does not search for another plugin to provide it.
 - Forward the engine's configured TLS provider into component-plugin stores,
   so operator-supplied certificate authorities are actually used there.
 
-The patch changes those two behaviors. It does not disable certificate or
-hostname verification. An unpatched host fails these tests; enabling a Cargo
-feature alone is insufficient on that revision.
+These behaviors are included in the source revision below.
+Use a release containing those fixes once available; the earlier 2.12.2
+release does not contain them.
+Certificate and hostname verification remain enabled.
 
 The verifier's native host installs a `SharedTlsProvider` backed by rustls and
 trusts a freshly generated test certificate. See the complete provider in
@@ -81,16 +84,14 @@ for the native host's TLS dependencies. Run from this directory:
 
 ```sh
 # Stop at the first failed command without changing the calling shell's options.
+TLS_RUNTIME_DIR="$(mktemp -d)/wasmCloud"
 (
 set -eu
 cargo test --locked
 
-# Use a fresh checkout so the compatibility patch has a known base.
-TLS_RUNTIME_DIR="$(mktemp -d)/wasmCloud"
+# Use the upstream revision containing the merged TLS fixes.
 git clone https://github.com/wasmCloud/wasmCloud.git "$TLS_RUNTIME_DIR"
-git -C "$TLS_RUNTIME_DIR" checkout 86e98479cf8336f563e68f66d6ee6c0b8924b2c9
-git -C "$TLS_RUNTIME_DIR" apply --check "$PWD/verification/runtime.patch"
-git -C "$TLS_RUNTIME_DIR" apply "$PWD/verification/runtime.patch"
+git -C "$TLS_RUNTIME_DIR" checkout e764379bc2677198a335dc7ff58dc9e0bda0f1e3
 node verification/run.mjs --runtime-source "$TLS_RUNTIME_DIR"
 )
 ```
@@ -104,7 +105,7 @@ stores, and uses local TLS peers on dynamically allocated ports. No Docker,
 database, public endpoint, or real credentials are required.
 `--target-dir /path/to/cache` reuses native build artifacts; `--offline` uses
 already cached dependencies. The verifier and its lockfile are pinned to
-Wasmtime 48.0.8; validate newer runtime revisions separately.
+Wasmtime 48.0.10; validate newer runtime revisions separately.
 
 The ten native integration checks cover:
 
@@ -129,9 +130,9 @@ than an unrelated CA failure.
 
 ## Applying the pattern to Couchbase
 
-Reuse the stream wiring and verified handshake in the
-[Couchbase sockets plugin](../couchbase-wasi-sockets-p3/src/conn.rs), then run
-its existing KV framing and authentication over the plaintext TLS streams.
+The [Couchbase sockets plugin](../couchbase-wasi-sockets-p3/README.md#tls)
+implements this wiring for persistent connections behind its `tls` Cargo feature.
+Its existing KV framing and authentication run over the plaintext TLS streams.
 A persistent database connection keeps its streams and completion futures
 alive and reads protocol frames per operation. The echo example closes each
 connection after one exchange.
@@ -142,6 +143,14 @@ configuration. See [Couchbase's port reference](https://docs.couchbase.com/serve
 Include transport mode and TLS identity in a connection cache key, and keep
 the entire connection/handshake inside the operation's deadline.
 
-This example demonstrates the TLS transport. The existing Couchbase sockets
-plugin still explicitly refuses `couchbases://`; its routing, durability, and
-TLS feature work are separate from this tutorial.
+Run the real Couchbase TLS and HTTPS scenario with:
+
+```sh
+node verification/run.mjs --runtime-source "$TLS_RUNTIME_DIR" --couchbase
+```
+
+This adds Docker Compose and OpenSSL requirements.
+It runs the shared forty-step scenario through the actual Couchbase host
+plugin, including encrypted KV CRUD and SQL++ HTTPS, then the ten TLS tests above.
+The fixture publishes only dynamic host-loopback ports and is removed afterward.
+TLS does not add multi-node routing or Capella support to the Couchbase plugin.

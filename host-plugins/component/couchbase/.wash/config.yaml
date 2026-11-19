@@ -1,20 +1,12 @@
 version: 2.0.0
 
 wit:
-  # Two packages resolve from this checkout rather than a registry:
-  #
-  #   wasmcloud:couchbase — this project's own capability contract, in
-  #     `interface/`. That directory is what a consuming workload copies into
-  #     its own `wit/deps/`.
-  #   wasmcloud:host — defined and installed by the wasmCloud runtime itself,
-  #     vendored under `wit-deps/` from wasmCloud v2.12.0 so a clean checkout
-  #     builds without depending on what happens to be published.
-  #
+  # The Couchbase contract is developed here. Host and WASI packages are
+  # fetched from their registries by wash.
   # The leading `./` is required: wash reads a bare `a/b` source as an OCI
   # reference and only treats a dot-prefixed value as a local path.
   sources:
     "wasmcloud:couchbase": ./interface
-    "wasmcloud:host": ./wit-deps/wasmcloud-host
 
 build:
   # `wash build` runs `wit fetch` (resolving the overrides above), then this

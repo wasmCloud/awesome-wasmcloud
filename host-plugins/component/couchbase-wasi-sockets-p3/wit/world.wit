@@ -34,3 +34,9 @@ world couchbase-wasi-sockets-p3-plugin {
     export wasmcloud:couchbase/document@0.2.0;
     export wasmcloud:couchbase/sqlpp@0.2.0;
 }
+
+/// The KV plugin with verified TLS, for hosts with wasi-tls enabled.
+world couchbase-wasi-sockets-p3-tls-plugin {
+    include couchbase-wasi-sockets-p3-plugin;
+    import wasi:tls/client@0.3.0-draft;
+}

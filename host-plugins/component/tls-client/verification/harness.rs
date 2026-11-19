@@ -1,4 +1,6 @@
 #[cfg(test)]
+mod couchbase;
+#[cfg(test)]
 mod tls;
 #[cfg(test)]
 mod tests {

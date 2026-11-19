@@ -258,8 +258,10 @@ pub fn hello_features() -> Vec<u8> {
 /// The features a server agreed to, decoded from its `HELLO` response.
 pub fn parse_hello_response(value: &[u8]) -> Vec<u16> {
     value
-        .chunks_exact(2)
-        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|chunk| u16::from_be_bytes(*chunk))
         .collect()
 }
 

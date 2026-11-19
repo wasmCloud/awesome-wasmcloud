@@ -36,7 +36,7 @@ use bindings::exports::wasmcloud::host::workload_lifecycle::{
     Guest as LifecycleGuest, InterfaceBinding, WorkloadInfo,
 };
 use bindings::wasi::clocks::{monotonic_clock, system_clock};
-use bindings::wasi::sockets::ip_name_lookup;
+use bindings::wasi::sockets::{ip_name_lookup, types::IpAddress};
 use bindings::wasmcloud::host::{binding_secrets, identity};
 use bindings::wasmcloud::secrets::reveal::reveal;
 use bindings::wasmcloud::secrets::store::SecretValue;
@@ -191,24 +191,33 @@ async fn within<F: Future>(timeout_ms: u32, operation: F) -> Option<F::Output> {
 
 /// Resolve the binding's host and return a new authenticated connection.
 async fn open_connection(binding: &Binding) -> Result<Connection, String> {
-    let addresses = ip_name_lookup::resolve_addresses(binding.host.clone())
-        .await
-        .map_err(|e| format!("could not resolve `{}`: {e:?}", binding.host))?;
-    let address = addresses
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("`{}` resolved to no addresses", binding.host))?;
+    let address = match binding.host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(address)) => {
+            let octets = address.octets();
+            IpAddress::Ipv4((octets[0], octets[1], octets[2], octets[3]))
+        }
+        Ok(std::net::IpAddr::V6(address)) => {
+            let segments = address.segments();
+            IpAddress::Ipv6((
+                segments[0],
+                segments[1],
+                segments[2],
+                segments[3],
+                segments[4],
+                segments[5],
+                segments[6],
+                segments[7],
+            ))
+        }
+        Err(_) => ip_name_lookup::resolve_addresses(binding.host.clone())
+            .await
+            .map_err(|error| format!("could not resolve `{}`: {error:?}", binding.host))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("`{}` resolved to no addresses", binding.host))?,
+    };
 
-    Connection::open(
-        address,
-        binding.port,
-        &binding.username,
-        &binding.password,
-        &binding.bucket,
-        &binding.scope,
-        &binding.collection,
-    )
-    .await
+    Connection::open(address, binding).await
 }
 
 /// Run one operation on this binding's connection, within its time limit.
@@ -789,7 +798,11 @@ async fn query_service_inner(
 
     let (request, _sent) = Request::new(fields, Some(rx), trailers_rx, Some(options));
     let _ = request.set_method(&Method::Post);
-    let _ = request.set_scheme(Some(&Scheme::Http));
+    let _ = request.set_scheme(Some(&if binding.tls {
+        Scheme::Https
+    } else {
+        Scheme::Http
+    }));
     let _ = request.set_authority(Some(&binding.query_authority()));
     let _ = request.set_path_with_query(Some("/query/service"));
 

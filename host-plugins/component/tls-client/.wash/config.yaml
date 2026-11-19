@@ -2,7 +2,7 @@ version: 2.0.0
 wit:
   sources:
     "example:tls": ./interface
-    "wasi:tls": ./wit-deps/wasi-tls
+    "wasi:tls": ../../../wit-deps/wasi-tls
 build:
   command: cargo build --target wasm32-wasip2 --release
   component_path: target/wasm32-wasip2/release/tls_client_plugin.wasm
