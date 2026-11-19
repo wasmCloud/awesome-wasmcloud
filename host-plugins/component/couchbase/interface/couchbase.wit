@@ -16,6 +16,7 @@ package wasmcloud:couchbase@0.2.0;
 /// note at the point it occurs.
 
 /// General types that can be used throughout the couchbase interface
+@since(version = 0.2.0)
 interface types {
   /// ID of a Document
   ///
@@ -119,9 +120,9 @@ interface types {
     // did wrong. It has no way to say "the credentials were refused", "the
     // cluster never answered", or "this workload has no binding" — all of
     // which an implementation has to be able to report. Every 0.1.0-draft case
-    // above is unchanged, so existing match arms keep working; a `variant` is
-    // non-exhaustive in generated bindings, so consumers already carry a
-    // catch-all arm for these.
+    // above is unchanged. Consumers must handle the additional cases when
+    // migrating: WIT variants and their generated bindings have a fixed case
+    // set. Future failures that lack a dedicated case use `other`.
     // ---------------------------------------------------------------------
 
     /// The configured credentials were refused, or they do not grant this
@@ -188,9 +189,11 @@ interface types {
   /// as `sqlpp-query-options.consistent-with`. Three zeroes are not a token,
   /// and a query asked to be consistent with one is not made consistent with
   /// anything — it simply will not observe the write you meant to wait for,
-  /// silently. Check for a non-zero `partition-uuid` before treating these as
-  /// real, and reach for `query-scan-consistency.request-plus` when what you
-  /// actually need is read-your-writes.
+  /// unless the implementer rejects invalid tokens. These plugins reject
+  /// zero UUIDs with `sqlpp-query-error.invalid-argument`.
+  /// Check for a non-zero `partition-uuid` before treating these as real,
+  /// and use `query-scan-consistency.request-plus` for read-your-writes when
+  /// no mutation token is available.
   record mutation-metadata {
     /// CAS revision of the document
     cas: u64,
@@ -286,6 +289,7 @@ interface types {
 
 /// Mappings of SQL++ (formerly known as N1QL) to WebAssembly (WIT) types
 ///
+@since(version = 0.2.0)
 interface sqlpp-types {
   use types.{json-string};
 
@@ -351,6 +355,7 @@ interface sqlpp-types {
 /// Which bucket, scope and collection these operate on is not a parameter here,
 /// exactly as in 0.1.0-draft: it comes from the caller's link/interface
 /// configuration.
+@since(version = 0.2.0)
 interface document {
   use types.{
       document, document-flags, document-id, document-error, mutation-metadata, time, durability-level,
@@ -788,6 +793,7 @@ interface document {
 /// Reference: https://docs.couchbase.com/server/current/n1ql/n1ql-language-reference/index.html
 ///
 /// DIFFERS FROM 0.1.0-draft: `query` is an `async func`. Otherwise unchanged.
+@since(version = 0.2.0)
 interface sqlpp {
   use types.{mutation-state, query-scan-consistency, query-profile-mode, retry-strategy, request-span};
   use sqlpp-types.{sqlpp-value, sqlpp-query-error};
@@ -833,11 +839,10 @@ interface sqlpp {
     /// Only usable with tokens an implementation genuinely produced. Where
     /// mutation tokens are unavailable — see the note on
     /// `types.mutation-metadata` — this cannot be satisfied, and passing tokens
-    /// assembled from its zeroed vbucket fields fails *silently*: the query
-    /// runs without waiting for anything, so a just-written document may not
-    /// appear. Prefer `scan-consistency.request-plus` when what you need is to
-    /// observe your own writes; it is honoured everywhere and costs one wait
-    /// rather than a wrong answer.
+    /// assembled from its zeroed vbucket fields cannot establish consistency.
+    /// These plugins reject an empty state, zero UUIDs, mismatched buckets or
+    /// conflicting histories with `sqlpp-query-error.invalid-argument`.
+    /// Prefer `scan-consistency.request-plus` when no token is available.
     consistent-with: option<mutation-state>,
 
     /// Whether or not to profile the query
