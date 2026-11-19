@@ -1,0 +1,5 @@
+package example:tls-caller@0.1.0;
+world caller {
+    import example:tls/client@0.1.0;
+    export wasi:http/handler@0.3.0;
+}

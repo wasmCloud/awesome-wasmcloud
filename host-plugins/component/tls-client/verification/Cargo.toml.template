@@ -1,0 +1,19 @@
+[package]
+name = "tls-client-verification"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+[dev-dependencies]
+wash-runtime = { path = __RUNTIME_PATH__, default-features = false, features = ["wasi-tls", "host-component-plugins", "oci"] }
+anyhow = "1"
+bytes = "1"
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
+rcgen = "0.14"
+wasmtime-wasi-tls = { version = "48.0.8", default-features = false, features = ["p3", "rustls"] }
+reqwest = { version = "0.12", default-features = false }
+semver = "1"
+[features]
+wasi-tls = []
+default = ["wasi-tls"]

@@ -1,0 +1,5 @@
+!.wash/
+.wash/*
+!.wash/config.yaml
+verification/caller/.wash/*
+!verification/caller/.wash/config.yaml

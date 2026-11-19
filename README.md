@@ -46,6 +46,7 @@ Capabilities built as [WebAssembly components](https://wasmcloud.com/docs/runtim
 
 - [couchbase-wasi-sockets-p3](host-plugins/component/couchbase-wasi-sockets-p3/) (hosted): The recommended implementation of `wasmcloud:couchbase@0.2.0`. Speaks Couchbase's KV binary protocol directly over `wasi:sockets@0.3.0`, with no SDK and no gateway in front of the cluster. Every socket operation is awaited, so concurrent calls interleave rather than queueing behind one another.
 - [couchbase](host-plugins/component/couchbase/) (hosted): Serves `wasmcloud:couchbase@0.2.0` — document CRUD and SQL++ queries — over the Couchbase Capella Data API using `wasi:http/client@0.3.0`. Written in Rust; mirrors the published `@0.1.0-draft` interface with `async func` throughout, which a component host plugin requires, and takes per-workload cluster credentials through the `wasmcloud:host/workload-lifecycle` bind hook.
+- [tls-client](host-plugins/component/tls-client/) (hosted): Wraps a WASI TCP connection with host-provided TLS from a host component plugin. Includes a caller, certificate and egress failure tests, and the runtime compatibility patch needed by the tested TLS draft.
 
 ## Workload Examples
 

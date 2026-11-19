@@ -1,0 +1,8 @@
+package example:tls-host-plugin@0.1.0;
+world tls-client {
+    import wasi:sockets/types@0.3.0;
+    import wasi:tls/client@0.3.0-draft;
+    import wasi:tls/types@0.3.0-draft;
+    import wasi:clocks/monotonic-clock@0.3.0;
+    export example:tls/client@0.1.0;
+}
