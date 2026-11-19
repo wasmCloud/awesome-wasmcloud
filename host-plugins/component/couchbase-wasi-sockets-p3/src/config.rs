@@ -22,6 +22,7 @@ const DEFAULT_TIMEOUT_MS: u32 = 30_000;
 pub struct ConnectionKey {
     host: String,
     port: u16,
+    tls: bool,
     username: String,
     password: String,
     bucket: String,
@@ -36,6 +37,8 @@ pub struct Binding {
     pub host: String,
     /// KV port.
     pub port: u16,
+    /// Verify TLS using `host` as the certificate identity and SNI name.
+    pub tls: bool,
     /// Query service port, for the SQL++ passthrough.
     pub query_port: u16,
     pub username: String,
@@ -80,14 +83,15 @@ impl Binding {
         // Credentials are opaque: trimming them changes the identity sent to
         // the server, including passwords supplied by a secret provider.
         let credential = |key: &str| -> Result<&str, String> {
-            config.iter()
+            config
+                .iter()
                 .find(|(k, _)| k == key)
                 .map(|(_, value)| value.as_str())
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| format!("missing required config key `{key}`"))
         };
 
-        let (host, port) = parse_endpoint(require("endpoint")?)?;
+        let (host, port, tls) = parse_endpoint(require("endpoint")?)?;
 
         let timeout_ms = match get("timeout-ms") {
             Some(raw) => raw.parse::<u32>().map_err(|_| {
@@ -103,12 +107,19 @@ impl Binding {
             Some(raw) => raw
                 .parse::<u16>()
                 .map_err(|_| "config key `query-port` must be a port number".to_string())?,
-            None => DEFAULT_QUERY_PORT,
+            None => {
+                if tls {
+                    18093
+                } else {
+                    DEFAULT_QUERY_PORT
+                }
+            }
         };
 
         Ok(Self {
             host,
             port,
+            tls,
             query_port,
             username: credential("username")?.to_string(),
             password: credential("password")?.to_string(),
@@ -129,6 +140,7 @@ impl Binding {
         ConnectionKey {
             host: self.host.clone(),
             port: self.port,
+            tls: self.tls,
             username: self.username.clone(),
             password: self.password.clone(),
             bucket: self.bucket.clone(),
@@ -146,20 +158,16 @@ impl Binding {
     }
 }
 
-/// Split `couchbase://host[:port]` into its host and port.
+/// Split a Couchbase endpoint into its host, port and transport mode.
 ///
-/// `couchbases://` is refused rather than silently downgraded: this
-/// implementation has no TLS yet, and quietly sending credentials in the clear
-/// because the scheme was misread would be the worst possible reading of it.
-fn parse_endpoint(raw: &str) -> Result<(String, u16), String> {
-    let rest = match raw.split_once("://") {
-        Some(("couchbase", rest)) => rest,
-        Some(("couchbases", _)) => {
-            return Err(
-                "config key `endpoint` uses couchbases://, and this plugin has no TLS yet; use the `couchbase` (Data API) plugin for a TLS endpoint, or couchbase:// on a trusted network"
-                    .to_string(),
-            )
-        }
+/// A TLS endpoint is never downgraded when TLS support was not compiled in.
+fn parse_endpoint(raw: &str) -> Result<(String, u16, bool), String> {
+    let (rest, tls) = match raw.split_once("://") {
+        Some(("couchbase", rest)) => (rest, false),
+        Some(("couchbases", rest)) if cfg!(feature = "tls") => (rest, true),
+        Some(("couchbases", _)) => return Err(
+            "config key `endpoint` uses couchbases://; rebuild this plugin with --features tls to enable verified TLS".to_string(),
+        ),
         Some(("http", _)) | Some(("https", _)) => {
             return Err(
                 "config key `endpoint` is an HTTP URL; that is the Data API, served by the `couchbase` plugin. This one speaks the KV protocol and wants `couchbase://host`"
@@ -169,8 +177,9 @@ fn parse_endpoint(raw: &str) -> Result<(String, u16), String> {
         Some((_, _)) => {
             return Err("config key `endpoint` must use couchbase://".to_string())
         }
-        None => raw,
+        None => (raw, false),
     };
+    let default_port = if tls { 11207 } else { DEFAULT_KV_PORT };
 
     if rest.is_empty() {
         return Err("config key `endpoint` has no host".to_string());
@@ -183,7 +192,7 @@ fn parse_endpoint(raw: &str) -> Result<(String, u16), String> {
             .parse::<std::net::Ipv6Addr>()
             .map_err(|_| "config key `endpoint` has an invalid IPv6 address".to_string())?;
         let port = if suffix.is_empty() {
-            DEFAULT_KV_PORT
+            default_port
         } else {
             let raw = suffix
                 .strip_prefix(':')
@@ -191,7 +200,7 @@ fn parse_endpoint(raw: &str) -> Result<(String, u16), String> {
             raw.parse::<u16>()
                 .map_err(|_| "config key `endpoint` has an invalid port".to_string())?
         };
-        return Ok((address.to_string(), port));
+        return Ok((address.to_string(), port, tls));
     }
     if rest.matches(':').count() > 1 {
         return Err("config key `endpoint` must enclose an IPv6 address in brackets".to_string());
@@ -201,9 +210,9 @@ fn parse_endpoint(raw: &str) -> Result<(String, u16), String> {
             let port = port
                 .parse::<u16>()
                 .map_err(|_| "config key `endpoint` has an invalid port".to_string())?;
-            Ok((host.to_string(), port))
+            Ok((host.to_string(), port, tls))
         }
-        _ => Ok((rest.to_string(), DEFAULT_KV_PORT)),
+        _ => Ok((rest.to_string(), default_port, tls)),
     }
 }
 
@@ -225,7 +234,10 @@ mod tests {
             pairs.retain(|(k, _)| k != key);
             pairs.push((key.into(), value.into()));
             let error = Binding::from_config(&pairs).unwrap_err();
-            assert!(error.contains(key), "the diagnostic should identify the key");
+            assert!(
+                error.contains(key),
+                "the diagnostic should identify the key"
+            );
             assert!(!error.contains("synthetic-private-value"), "{error}");
         }
     }
@@ -259,7 +271,10 @@ mod tests {
             ("couchbase://[::1]", "::1", 11210),
             ("couchbase://[2001:db8::1]:12000", "2001:db8::1", 12000),
         ] {
-            assert_eq!(parse_endpoint(endpoint).unwrap(), (host.into(), port));
+            assert_eq!(
+                parse_endpoint(endpoint).unwrap(),
+                (host.into(), port, false)
+            );
             let mut binding = Binding::from_config(&minimal()).unwrap();
             binding.host = host.into();
             assert_eq!(binding.query_authority(), format!("[{host}]:8093"));
@@ -303,16 +318,54 @@ mod tests {
 
     #[test]
     fn an_explicit_port_is_kept() {
-        assert_eq!(parse_endpoint("couchbase://host:12000").unwrap(), ("host".to_string(), 12000));
-        assert_eq!(parse_endpoint("host").unwrap(), ("host".to_string(), DEFAULT_KV_PORT));
+        assert_eq!(
+            parse_endpoint("couchbase://host:12000").unwrap(),
+            ("host".to_string(), 12000, false)
+        );
+        assert_eq!(
+            parse_endpoint("host").unwrap(),
+            ("host".to_string(), DEFAULT_KV_PORT, false)
+        );
     }
 
     #[test]
+    #[cfg(not(feature = "tls"))]
     fn tls_is_refused_rather_than_downgraded() {
         let err = parse_endpoint("couchbases://host").unwrap_err();
-        assert!(err.contains("no TLS"), "got: {err}");
+        assert!(err.contains("--features tls"), "got: {err}");
         // And an HTTP endpoint points at the sibling plugin.
-        assert!(parse_endpoint("https://host").unwrap_err().contains("Data API"));
+        assert!(parse_endpoint("https://host")
+            .unwrap_err()
+            .contains("Data API"));
+    }
+
+    #[test]
+    #[cfg(feature = "tls")]
+    fn tls_preserves_identity_and_defaults_both_encrypted_ports() {
+        for (endpoint, host, port) in [
+            ("couchbases://db.example", "db.example", 11207),
+            ("couchbases://db.example:12000", "db.example", 12000),
+            ("couchbases://[2001:db8::1]", "2001:db8::1", 11207),
+        ] {
+            let mut pairs = minimal();
+            pairs[0].1 = endpoint.into();
+            let binding = Binding::from_config(&pairs).unwrap();
+            assert_eq!(
+                (binding.host.as_str(), binding.port, binding.tls),
+                (host, port, true)
+            );
+            assert_eq!(binding.query_port, 18093);
+            let plain = Binding {
+                tls: false,
+                ..binding.clone()
+            };
+            assert_ne!(binding.connection_key(), plain.connection_key());
+            let other_name = Binding {
+                host: "other.example".into(),
+                ..binding.clone()
+            };
+            assert_ne!(binding.connection_key(), other_name.connection_key());
+        }
     }
 
     #[test]
@@ -325,18 +378,30 @@ mod tests {
     #[test]
     fn names_the_missing_key() {
         for missing in ["endpoint", "bucket", "username", "password"] {
-            let pairs: Vec<_> = minimal().into_iter().filter(|(k, _)| k != missing).collect();
+            let pairs: Vec<_> = minimal()
+                .into_iter()
+                .filter(|(k, _)| k != missing)
+                .collect();
             let err = Binding::from_config(&pairs).unwrap_err();
-            assert!(err.contains(missing), "error should name `{missing}`, got: {err}");
+            assert!(
+                err.contains(missing),
+                "error should name `{missing}`, got: {err}"
+            );
         }
     }
 
     #[test]
     fn a_per_call_timeout_overrides_the_bindings() {
         let binding = Binding::from_config(&minimal()).unwrap();
-        assert_eq!(binding.with_timeout_ns(Some(5_000_000_000)).timeout_ms, 5_000);
+        assert_eq!(
+            binding.with_timeout_ns(Some(5_000_000_000)).timeout_ms,
+            5_000
+        );
         assert_eq!(binding.with_timeout_ns(None).timeout_ms, DEFAULT_TIMEOUT_MS);
-        assert_eq!(binding.with_timeout_ns(Some(0)).timeout_ms, DEFAULT_TIMEOUT_MS);
+        assert_eq!(
+            binding.with_timeout_ns(Some(0)).timeout_ms,
+            DEFAULT_TIMEOUT_MS
+        );
         assert_eq!(binding.with_timeout_ns(Some(1)).timeout_ms, 1);
         assert_eq!(binding.with_timeout_ns(Some(1_500_000)).timeout_ms, 2);
     }

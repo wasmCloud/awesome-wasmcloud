@@ -70,7 +70,10 @@ suites when changing a transport.
 The separate [TLS host component plugin example](../host-plugins/component/tls-client/)
 has its own native verifier. It runs a caller through a real plugin store with
 trusted and rejected certificates, denied egress, handshake deadlines and reply
-bounds. Its README pins the runtime revision and documents the compatibility patch.
+bounds. Its README pins an upstream runtime revision containing the merged TLS fixes.
+The optional `--couchbase` run exercises the actual sockets plugin against
+forty real Couchbase KV TLS and SQL++ HTTPS scenario steps, plus binding failures
+for a mismatched certificate identity and denied egress.
 
 ## Support boundaries
 
@@ -88,7 +91,7 @@ These are capability examples, not complete Couchbase or gRPC SDKs.
 | Legacy persist-to / replicate-to | Explicitly refused | Explicitly refused |
 | Lock / unlock | Gateway alpha endpoints required | Supported |
 | Replica reads | Explicitly refused | Explicitly refused |
-| TLS | Supported | Explicitly refused |
+| TLS | Supported | Supported with the `tls` build and a host containing wasmCloud PR #6014 |
 | Multi-node topology / rebalance | Gateway manages routing | Not implemented; misrouted operations return an error |
 | Projection | Delegated to gateway | Dot-separated object fields; arrays and escaped fields are explicitly refused |
 | Plugin-backed secret handles | Not imported; host refuses such a binding | Supported |

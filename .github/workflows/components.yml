@@ -7,6 +7,7 @@ on:
       - host-plugins/component/couchbase/**
       - host-plugins/component/couchbase-wasi-sockets-p3/**
       - host-plugins/component/tls-client/**
+      - wit-deps/**
       - tests/**
       - .github/workflows/components.yml
   workflow_dispatch:
@@ -34,6 +35,7 @@ jobs:
           cargo test --locked --manifest-path components/grpc-client/Cargo.toml
           cargo test --locked --manifest-path host-plugins/component/couchbase/Cargo.toml
           cargo test --locked --manifest-path host-plugins/component/couchbase-wasi-sockets-p3/Cargo.toml
+          cargo test --locked --features tls --manifest-path host-plugins/component/couchbase-wasi-sockets-p3/Cargo.toml
           cargo test --locked --manifest-path host-plugins/component/tls-client/Cargo.toml
       - name: Test verification runners
         run: |
@@ -41,5 +43,6 @@ jobs:
           node --check tests/component-build.mjs
           node --check tests/fixtures/server.js
           node --check host-plugins/component/tls-client/verification/run.mjs
+          node --check host-plugins/component/couchbase-wasi-sockets-p3/verification/fixture.mjs
           node --input-type=module -e "await import('./tests/verify-components.mjs'); await import('./host-plugins/component/tls-client/verification/run.mjs')"
           node --test tests/verify-components.test.mjs

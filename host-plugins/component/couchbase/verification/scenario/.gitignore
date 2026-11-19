@@ -1,0 +1,3 @@
+!.wash/
+.wash/*
+!.wash/config.yaml

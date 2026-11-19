@@ -11,9 +11,11 @@ uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["full"] }
 tokio-rustls = "0.26"
 rcgen = "0.14"
-wasmtime-wasi-tls = { version = "48.0.8", default-features = false, features = ["p3", "rustls"] }
+wasmtime-wasi-tls = { version = "48.0.9", default-features = false, features = ["p3", "rustls"] }
 reqwest = { version = "0.12", default-features = false }
 semver = "1"
+hyper = "1"
+wasmtime-wasi-http = { version = "48.0.9", default-features = false, features = ["p3"] }
 [features]
 wasi-tls = []
 default = ["wasi-tls"]

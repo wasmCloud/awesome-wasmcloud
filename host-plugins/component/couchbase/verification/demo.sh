@@ -35,6 +35,7 @@ P3_WASM="$PLUGINS/couchbase-wasi-sockets-p3/target/wasm32-wasip2/release/couchba
 CONFIG="$SCENARIO/.wash/config.yaml"
 OUT="$(mktemp -d)"
 DEVPID=""
+if [[ -f "$CONFIG" ]]; then cp "$CONFIG" "$OUT/config.yaml"; fi
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
@@ -43,6 +44,11 @@ die()  { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 cleanup() {
   if [[ -n "$DEVPID" ]]; then kill "$DEVPID" 2>/dev/null || true; fi
+  if [[ -f "$OUT/config.yaml" ]]; then
+    cp "$OUT/config.yaml" "$CONFIG"
+  else
+    rm -f "$CONFIG"
+  fi
   if [[ $KEEP -eq 0 ]]; then
     (cd "$HERE" && docker compose down -v >/dev/null 2>&1) || true
   else

@@ -1,9 +1,9 @@
 # Couchbase KV Component Host Plugin (wasi:sockets)
 
 The recommended implementation of `wasmcloud:couchbase@0.2.0`, speaking Couchbase's KV
-binary protocol directly over `wasi:sockets@0.3.0`. **No SDK and no gateway** —
-the protocol is implemented here: ~340 lines of wire format in `proto.rs` and
-~215 of connection handling in `conn.rs`, plus the bindings glue.
+binary protocol directly over `wasi:sockets@0.3.0`, with optional verified TLS
+through `wasi:tls@0.3.0-draft`. **No SDK and no gateway** — the protocol is
+implemented in `proto.rs` and `conn.rs`, with the bindings glue in `plugin.rs`.
 
 This is the one to reach for when the Data API is not available: it needs
 nothing in front of the cluster, and talks to a stock Couchbase Server.
@@ -83,9 +83,6 @@ unit test for precisely that, checked against what a live cluster serves.
 
 ## What it does not do
 
-- **No TLS**, so no `couchbases://` and no Capella. `couchbases://` is refused
-  rather than quietly downgraded. Adding it means `wasi:tls@0.3.0-draft`, whose
-  WIT is not in a registry and would need vendoring.
 - **One node.** The cluster map is read for its vbucket count, not its topology:
   there is no per-node connection and no rebalance following. A `not-my-vbucket`
   is reported rather than retried elsewhere. Use a single-node cluster; a generic
@@ -97,18 +94,14 @@ unit test for precisely that, checked against what a live cluster serves.
 - **Durable KV writes are refused.** `durability-level` values other than
   `unknown` and `none`, and non-zero `persist-to`/`replicate-to`, return
   `unsupported`. Use the Data API plugin when a write needs durability.
-- **SASL PLAIN only.** The server also offers SCRAM-SHA1/256/512. PLAIN over an
-  untrusted network sends the password in the clear, which is the other reason
-  TLS matters here.
+- **SASL PLAIN only.** Use `couchbases://` with the TLS build to encrypt the
+  credentials and verify the cluster's identity.
 
 Each of these returns `unsupported` with a message naming the reason, rather
 than a wrong answer.
 
-For a runnable example of adding TLS to a host component plugin, see
-[`tls-client`](../tls-client/). It demonstrates verified `wasi:tls` stream
-wrapping, custom CA trust, certificate rejection and the required runtime
-plumbing. Its Couchbase adaptation notes explain where to attach those streams
-to this plugin; this plugin's current `couchbases://` behavior remains unchanged.
+TLS does not add multi-node routing, replica reads or cluster discovery.
+Capella deployments require those features and remain unsupported.
 
 Expiry reads compare the document and metadata CAS values and retry both reads
 when they disagree. The call deadline also bounds a continuously changing
@@ -124,11 +117,11 @@ without a database account.
 
 | Key | Required | Default | Meaning |
 |---|---|---|---|
-| `endpoint` | yes | — | `couchbase://host[:port]`, port defaulting to `11210` |
+| `endpoint` | yes | — | `couchbase://host[:port]` (default `11210`), or `couchbases://host[:port]` (default `11207`) with the TLS build |
 | `bucket` | yes | — | The one bucket this binding may reach |
 | `username` / `password` | yes | — | Cluster credential. Source them from `secretFrom` |
 | `scope` / `collection` | no | `_default` | Keyspace this binding operates in |
-| `query-port` | no | `8093` | Query service port, for SQL++ |
+| `query-port` | no | `8093` / `18093` | SQL++ port, HTTP for `couchbase://` and HTTPS for `couchbases://` |
 | `timeout-ms` | no | `30000` | Time limit on a call, document or SQL++, overridden by the call's own `timeout-ns`. Also bounds the connection attempt at bind |
 
 SQL++ is an HTTP service, so it goes out over `wasi:http` to `query-port` rather
@@ -175,7 +168,7 @@ cancelled bind cannot publish state after unbind or a newer bind.
 
 ## Building
 
-Tested with `wash` 2.12.0 and Rust 1.97, targeting `wasm32-wasip2`.
+Targets `wasm32-wasip2`; CI uses stable Rust.
 
 ```console
 wash build
@@ -183,6 +176,62 @@ wash build
 
 Host component plugins are opt-in: the host must be built with the
 `host-component-plugins` feature. The released `-all-features` images carry it.
+
+### TLS
+
+The TLS API is an experimental WASI draft.
+The default build supports plaintext endpoints on older hosts.
+Build the TLS variant with:
+
+```sh
+wash wit fetch
+cargo build --locked --target wasm32-wasip2 --release --features tls --target-dir target/tls
+```
+
+This produces `target/tls/wasm32-wasip2/release/couchbase_wasi_sockets_p3_plugin.wasm`,
+with the additional TLS imports.
+It requires a host with both `host-component-plugins` and `wasi-tls`, including
+the fixes merged in [wasmCloud PR #6014](https://github.com/wasmCloud/wasmCloud/pull/6014).
+Use a release containing those fixes once available, or the upstream source
+revision documented in the [TLS example](../tls-client/README.md#build-and-verify).
+Host and secrets WIT are fetched normally by wash.
+Only the TLS draft is [vendored at the repository root](../../../wit-deps/README.md).
+
+Set `endpoint: couchbases://db.example.com` on the Couchbase binding.
+The KV port defaults to `11207`, and SQL++ uses HTTPS on `18093`.
+Grant the plugin both ports through `allowedHosts`.
+The TLS handshake verifies the original endpoint hostname before any KV
+authentication or application data is sent.
+There is no plaintext fallback or certificate-verification bypass.
+A build without the `tls` feature rejects `couchbases://` with rebuild instructions.
+
+The host controls trust: raw KV TLS uses its `SharedTlsProvider`; SQL++ uses
+the HTTP client's trust configuration, including `http_client_ca_paths` for
+private CAs. Configuring that HTTP setting alone does not change raw TLS trust.
+The [native verifier](../tls-client/verification/tls.rs) shows a provider with a
+custom root certificate, and the
+[Couchbase harness](verification/tls.rs) configures both trust paths.
+
+Persistent connections retain their TLS streams and completion futures.
+A bounded ciphertext bridge runs while a handshake or KV operation is active;
+operation deadlines cover DNS, TCP, TLS and the protocol exchange.
+The connection cache includes transport mode and the original certificate identity.
+
+To run the shared forty-step scenario against real Couchbase KV TLS and SQL++
+HTTPS, use Node.js 22+, Docker Compose and OpenSSL:
+
+```sh
+node ../tls-client/verification/run.mjs --runtime-source /path/to/wasmCloud --couchbase
+```
+
+The verifier builds the TLS plugin and caller, creates an isolated single-node
+Couchbase fixture with fresh certificates and loopback-only dynamic ports,
+and removes its containers and certificates afterward.
+The native host installs the test CA separately for KV TLS and SQL++ HTTPS.
+The local fixture routes the HTTP authority to `localhost`, another verified
+identity on its test certificate; raw sockets use `host.wasmcloud.internal`.
+It also checks that a mismatched KV certificate identity and denied egress
+reject a workload during binding.
 
 ## License
 

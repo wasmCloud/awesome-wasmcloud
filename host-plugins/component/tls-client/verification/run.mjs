@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { buildComponents } from '../../../../tests/component-build.mjs';
+import { startCouchbaseTlsFixture } from '../../couchbase-wasi-sockets-p3/verification/fixture.mjs';
 
 async function main() {
   const { values } = parseArgs({ options: {
@@ -14,10 +15,11 @@ async function main() {
     'skip-build': { type: 'boolean', default: false },
     offline: { type: 'boolean', default: false },
     'target-dir': { type: 'string' },
+    couchbase: { type: 'boolean', default: false },
     help: { type: 'boolean', default: false },
   } });
   if (values.help) {
-    console.log('node verification/run.mjs --runtime-source <wasmCloud checkout> [--skip-build] [--offline] [--target-dir <cache>]');
+    console.log('node verification/run.mjs --runtime-source <wasmCloud checkout> [--couchbase] [--skip-build] [--offline] [--target-dir <cache>]');
     return;
   }
   if (!values['runtime-source']) throw new Error('--runtime-source is required');
@@ -37,25 +39,44 @@ async function main() {
   const packages = Array.isArray(metadata.packages) ? metadata.packages : [];
   const runtimePackage = packages.find(pkg => pkg?.name === 'wash-runtime');
   const dependencies = Array.isArray(runtimePackage?.dependencies) ? runtimePackage.dependencies : [];
-  if (!dependencies.some(dep => dep?.name === 'wasmtime-wasi-tls' && dep.req === '^48.0.8')) {
-    throw new Error("the verifier is pinned to Wasmtime 48.0.8; use the README's runtime revision");
+  if (!dependencies.some(dep => dep?.name === 'wasmtime-wasi-tls' && dep.req === '^48.0.9')) {
+    throw new Error("the verifier requires the runtime's Wasmtime 48.0.9 dependency range; use the README's runtime revision");
   }
 
   if (!values['skip-build']) {
     buildComponents([root, join(root, 'verification/caller')], environment);
+    if (values.couchbase) {
+      const couchbase = resolve(root, '../couchbase-wasi-sockets-p3');
+      buildComponents([resolve(root, '../couchbase/verification/scenario')], environment);
+      execFileSync('wash', ['wit', 'fetch'], { cwd: couchbase, env: environment, stdio: 'inherit' });
+      execFileSync('cargo', ['build', '--locked', '--target', 'wasm32-wasip2', '--release', '--features', 'tls',
+        '--target-dir', join(couchbase, 'target/tls')], {
+        cwd: couchbase, env: environment, stdio: 'inherit',
+      });
+    }
   }
   const harness = await mkdtemp(join(tmpdir(), 'tls-client-verification-'));
+  let couchbaseFixture;
   try {
+    if (values.couchbase) {
+      couchbaseFixture = await startCouchbaseTlsFixture();
+      Object.assign(environment, couchbaseFixture.environment, {
+        COUCHBASE_TLS_ROOT: resolve(root, '../couchbase-wasi-sockets-p3'),
+      });
+    }
     await mkdir(join(harness, 'src'));
     const manifest = await readFile(join(root, 'verification/Cargo.toml.template'), 'utf8');
     await writeFile(join(harness, 'Cargo.toml'), manifest.replace('__RUNTIME_PATH__', JSON.stringify(runtime)));
     await copyFile(join(root, 'verification/Cargo.lock'), join(harness, 'Cargo.lock'));
     await copyFile(join(root, 'verification/harness.rs'), join(harness, 'src/lib.rs'));
     await copyFile(join(root, 'verification/tls.rs'), join(harness, 'src/tls.rs'));
+    await copyFile(resolve(root, '../couchbase-wasi-sockets-p3/verification/tls.rs'), join(harness, 'src/couchbase.rs'));
     execFileSync('cargo', ['test', '--locked', '--manifest-path', join(harness, 'Cargo.toml'),
-      '--', '--nocapture', '--test-threads=1'], { env: environment, stdio: 'inherit' });
+      '--', '--nocapture', '--test-threads=1', ...(values.couchbase ? ['--include-ignored'] : [])],
+    { env: environment, stdio: 'inherit' });
   } finally {
-    await rm(harness, { recursive: true, force: true });
+    try { await couchbaseFixture?.close(); }
+    finally { await rm(harness, { recursive: true, force: true }); }
   }
 }
 

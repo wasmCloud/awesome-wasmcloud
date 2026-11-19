@@ -51,8 +51,8 @@ note at the point it occurs in [`interface/couchbase.wit`](interface/couchbase.w
 2. **`document-error` and `sqlpp-query-error` gain cases.** 0.1.0-draft's
    `document-error` can only describe what a *document* did wrong — it has no
    way to say "the credentials were refused", "the cluster never answered", or
-   "this workload has no binding". Every original case is unchanged, so existing
-   match arms keep working.
+   "this workload has no binding". Original cases are retained, but consumers
+   must handle the added cases when migrating; variants have a fixed case set.
 3. **`sqlpp-value` gains a `json` case.** 0.1.0-draft declares it with `null` as
    its only case, which cannot carry a parameter into a query or a row out of
    one.
@@ -465,8 +465,9 @@ A real mutation token parses structurally
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE). Vendored WIT and its provenance are
-documented in [`wit-deps/README.md`](wit-deps/README.md). The interface mirrors
+Apache-2.0. See [LICENSE](LICENSE).
+Host, secrets and WASI WIT dependencies are fetched from registries by wash.
+The interface mirrors
 `wasmcloud:couchbase@0.1.0-draft` from
 [`Couchbase-Ecosystem/wasmcloud-provider-couchbase`](https://github.com/Couchbase-Ecosystem/wasmcloud-provider-couchbase),
 which is Apache-2.0.

@@ -19,7 +19,10 @@ pub mod transport;
 #[cfg(target_family = "wasm")]
 mod bindings {
     #![allow(unsafe_code)]
+    #[cfg(not(feature = "tls"))]
     wit_bindgen::generate!({ world: "couchbase-wasi-sockets-p3-plugin", generate_all });
+    #[cfg(feature = "tls")]
+    wit_bindgen::generate!({ world: "couchbase-wasi-sockets-p3-tls-plugin", generate_all });
 }
 
 pub mod config;
