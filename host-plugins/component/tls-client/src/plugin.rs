@@ -7,6 +7,8 @@ use bindings::wasi::{
     },
     tls::client::Connector,
 };
+use std::future::{poll_fn, Future};
+use std::pin::pin;
 struct Component;
 impl bindings::exports::example::tls::client::Guest for Component {
     async fn ping(address: String, server_name: String) -> Result<String, String> {
@@ -49,49 +51,75 @@ async fn ping(address: String, server_name: String) -> Result<String, String> {
         .connect(address)
         .await
         .map_err(|e| format!("connect: {e:?}"))?;
-    let (encrypted_rx, sock_rx_done) = socket.receive();
+    let (mut encrypted_rx, sock_rx_done) = socket.receive();
     let connector = Connector::new();
+    let (mut tls_input_writer, tls_input) = bindings::wit_stream::new();
     // Attach both directions before starting the handshake: the host needs
     // these streams to read and write the handshake's own TLS records.
-    let (mut plaintext_rx, tls_rx_done) = connector.receive(encrypted_rx);
+    let (mut plaintext_rx, tls_rx_done) = connector.receive(tls_input);
     let (mut writer, plaintext_tx) = bindings::wit_stream::new();
     let (encrypted_tx, tls_tx_done) = connector.send(plaintext_tx);
     let sock_tx_done = socket.send(encrypted_tx);
-    // This name controls SNI and certificate identity verification. Keep the
-    // original DNS name here even when TCP used its resolved IP address.
-    Connector::connect(connector, server_name)
+    let response = {
+        // Forward ciphertext only while the TLS exchange is active. After TLS
+        // EOF, dropping this bridge closes the transport input without waiting
+        // for the peer's TCP FIN. The TLS completion future still authenticates
+        // EOF and rejects a missing close_notify; we never infer success from
+        // the plaintext stream alone.
+        let mut forwarding = pin!(async move {
+            loop {
+                let (_, chunk) = encrypted_rx.read(Vec::with_capacity(4096)).await;
+                if chunk.is_empty() || !tls_input_writer.write_all(chunk).await.is_empty() {
+                    break;
+                }
+            }
+        });
+        let mut exchange = pin!(async {
+            // Keep the original DNS identity for certificate verification/SNI.
+            Connector::connect(connector, server_name)
+                .await
+                .map_err(|e| format!("TLS handshake: {}", e.to_debug_string()))?;
+            // Application data is sent only after the verified handshake.
+            if !writer.write_all(b"PING\r\n".to_vec()).await.is_empty() {
+                return Err("write failed".into());
+            }
+            drop(writer); // Emit close_notify for the TLS output half.
+            let mut response = Vec::new();
+            loop {
+                let (_, chunk) = plaintext_rx.read(Vec::with_capacity(128)).await;
+                if chunk.is_empty() {
+                    break;
+                }
+                if response.len() + chunk.len() > 1024 {
+                    return Err("TLS response exceeds the 1024-byte example limit".into());
+                }
+                response.extend_from_slice(&chunk);
+            }
+            Ok::<_, String>(response)
+        });
+        let mut forwarding_done = false;
+        poll_fn(|cx| {
+            if !forwarding_done && forwarding.as_mut().poll(cx).is_ready() {
+                forwarding_done = true;
+            }
+            exchange.as_mut().poll(cx)
+        })
         .await
-        .map_err(|e| format!("TLS handshake: {}", e.to_debug_string()))?;
-    // Application data is sent only after the verified handshake succeeds.
-    if !writer.write_all(b"PING\r\n".to_vec()).await.is_empty() {
-        return Err("write failed".into());
-    }
-    drop(writer); // The TLS transform emits close_notify for the output half.
-    let mut response = Vec::new();
-    loop {
-        let (_, chunk) = plaintext_rx.read(Vec::with_capacity(128)).await;
-        if chunk.is_empty() {
-            break;
-        }
-        if response.len() + chunk.len() > 1024 {
-            return Err("TLS response exceeds the 1024-byte example limit".into());
-        }
-        response.extend_from_slice(&chunk);
-    }
+    }?;
     // An ended stream alone does not prove success. The completion futures
     // also report socket failures, truncated TLS records and missing close_notify.
-    sock_rx_done
-        .await
-        .map_err(|e| format!("socket receive: {e:?}"))?;
-    sock_tx_done
-        .await
-        .map_err(|e| format!("socket send: {e:?}"))?;
     tls_rx_done
         .await
         .map_err(|e| format!("TLS receive: {}", e.to_debug_string()))?;
     tls_tx_done
         .await
         .map_err(|e| format!("TLS send: {}", e.to_debug_string()))?;
+    sock_rx_done
+        .await
+        .map_err(|e| format!("socket receive: {e:?}"))?;
+    sock_tx_done
+        .await
+        .map_err(|e| format!("socket send: {e:?}"))?;
     String::from_utf8(response).map_err(|e| e.to_string())
 }
 bindings::export!(Component with_types_in bindings);

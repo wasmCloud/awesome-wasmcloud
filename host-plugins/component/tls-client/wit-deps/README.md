@@ -1,7 +1,7 @@
 # Pinned TLS WIT
 
 `wasi-tls/` is the `wasi:tls@0.3.0-draft` stream-transform API copied from
-wasmCloud revision `269ceabad0c8c3bc02111cc1d399563e6465acc1`, under
+wasmCloud revision `86e98479cf8336f563e68f66d6ee6c0b8924b2c9`, under
 `crates/wash-runtime/tests/fixtures/p3-wit-deps/wasi-tls-0.3.0-draft/`.
 That runtime uses Wasmtime 48.0.8. The API has to match the host; fetching the
 unrelated P2 TLS proposal or a different draft does not provide these imports.
