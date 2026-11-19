@@ -38,6 +38,7 @@ pub enum PeerMode {
     Oversized,
     Stalled,
     Truncated,
+    KeepTcpOpen,
 }
 
 fn server_tls_config(mode: PeerMode) -> Result<(ServerConfig, Vec<u8>)> {
@@ -138,7 +139,13 @@ pub async fn start_tls_echo_server(mode: PeerMode) -> Result<EchoServer> {
                 };
                 let _ = tls_stream.write_all(&response).await;
                 let _ = tls_stream.flush().await;
-                if !matches!(mode, PeerMode::Truncated) {
+                if matches!(mode, PeerMode::KeepTcpOpen) {
+                    // Send an authenticated TLS EOF without shutting down TCP.
+                    // Keep the socket alive past the plugin's overall deadline.
+                    tls_stream.get_mut().1.send_close_notify();
+                    let _ = tls_stream.flush().await;
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                } else if !matches!(mode, PeerMode::Truncated) {
                     let _ = tls_stream.shutdown().await;
                 }
             });

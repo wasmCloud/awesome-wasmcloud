@@ -151,6 +151,15 @@ mod tests {
         Ok(())
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plugin_clean_tls_close_does_not_wait_for_tcp_fin() -> Result<()> {
+        let (status, body, ping) =
+            plugin_probe(true, "localhost", true, PeerMode::KeepTcpOpen).await?;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body, "PONG\r\n");
+        assert!(ping);
+        Ok(())
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn plugin_untrusted_certificate_fails_closed() -> Result<()> {
         let (status, body, ping) = plugin_probe(false, "localhost", true, PeerMode::Echo).await?;
         assert_eq!(status, 502);

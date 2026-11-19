@@ -7,7 +7,7 @@ handshake, sends `PING\r\n`, and returns the echo peer's reply.
 
 **Status: experimental reference example.** The components build with `wash`
 2.7.0 and Rust 1.96, targeting `wasm32-wasip2`. The verifier uses wasmCloud
-source revision `269ceabad0c8c3bc02111cc1d399563e6465acc1` (2.12.2), Wasmtime
+source revision `86e98479cf8336f563e68f66d6ee6c0b8924b2c9` (2.12.2), Wasmtime
 48.0.8, and the included [runtime compatibility patch](verification/runtime.patch).
 The TLS WIT is a draft, pinned locally to the host implementation.
 
@@ -24,13 +24,15 @@ flowchart LR
 The important code is in [`src/plugin.rs`](src/plugin.rs):
 
 1. Connect the TCP socket using the host's egress policy.
-2. Pass its encrypted receive stream to `Connector.receive`.
+2. Forward its encrypted receive stream through a bounded bridge into
+   `Connector.receive`.
 3. Pass an application stream to `Connector.send` and send the resulting
    encrypted stream through the socket.
 4. Call `Connector.connect` **after wiring both directions**, passing the
    original hostname for certificate verification and SNI.
 5. Send application bytes only after the handshake succeeds.
-6. Check both socket and TLS completion futures before reporting success.
+6. At plaintext EOF, stop the ciphertext bridge and check both TLS and socket
+   completion futures before reporting success.
 
 The address is an IP literal and port, such as `192.0.2.10:7443` or
 `[2001:db8::1]:7443`. The separate `server-name` is the certificate identity,
@@ -41,6 +43,10 @@ This one-shot example has a five-second overall deadline and a 1024-byte reply
 limit. Closing its application output emits TLS `close_notify`; the echo peer
 also closes its TLS output. Stream EOF alone does not prove a clean exchange:
 completion futures carry failures such as truncated TLS records.
+The ciphertext bridge stops at TLS EOF so a peer that sends `close_notify`
+without TCP FIN does not hold the call open. Ending that bridge does not bypass
+TLS validation: both TLS completion futures must still succeed, including the
+check for a missing `close_notify`.
 
 ## Host requirements and certificate trust
 
@@ -74,6 +80,9 @@ Requires Rust with `wasm32-wasip2`, `wash`, Git, Python 3.11+, and a C toolchain
 for the native host's TLS dependencies. Run from this directory:
 
 ```sh
+# Stop at the first failed command without changing the calling shell's options.
+(
+set -eu
 wash build
 (cd verification/caller && wash build)
 cargo test --locked
@@ -81,9 +90,11 @@ cargo test --locked
 # Use a fresh checkout so the compatibility patch has a known base.
 TLS_RUNTIME_DIR="$(mktemp -d)/wasmCloud"
 git clone https://github.com/wasmCloud/wasmCloud.git "$TLS_RUNTIME_DIR"
-git -C "$TLS_RUNTIME_DIR" checkout 269ceabad0c8c3bc02111cc1d399563e6465acc1
+git -C "$TLS_RUNTIME_DIR" checkout 86e98479cf8336f563e68f66d6ee6c0b8924b2c9
+git -C "$TLS_RUNTIME_DIR" apply --check "$PWD/verification/runtime.patch"
 git -C "$TLS_RUNTIME_DIR" apply "$PWD/verification/runtime.patch"
 python3 verification/run.py --runtime-source "$TLS_RUNTIME_DIR" --skip-build
+)
 ```
 
 `verification/run.py` builds both components unless `--skip-build` is supplied.
@@ -94,9 +105,11 @@ database, public endpoint, or real credentials are required.
 already cached dependencies. The verifier and its lockfile are pinned to
 Wasmtime 48.0.8; validate newer runtime revisions separately.
 
-The nine native integration checks cover:
+The ten native integration checks cover:
 
 - A verified round trip through the actual host component plugin.
+- A verified reply and TLS `close_notify` while the peer keeps TCP open past
+  the call deadline; the call must succeed without waiting for TCP FIN.
 - Untrusted, expired, and wrong-host certificates; no application bytes reach
   the peer after a rejected handshake.
 - Egress denied before TLS starts.
