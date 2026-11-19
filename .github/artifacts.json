@@ -1,0 +1,52 @@
+[
+  {
+    "id": "couchbase-wit",
+    "kind": "wit",
+    "releaseGroup": "couchbase",
+    "directory": "host-plugins/component/couchbase/interface",
+    "package": "wasmcloud:couchbase",
+    "smokeImports": ["document-read"],
+    "defaultRegistry": true,
+    "license": "Apache-2.0"
+  },
+  {
+    "id": "couchbase",
+    "kind": "component",
+    "releaseGroup": "couchbase",
+    "directory": "host-plugins/component/couchbase",
+    "binary": "couchbase_plugin",
+    "contracts": {
+      "couchbase-wit": ["types", "sqlpp-types", "document-read", "document-write", "sqlpp"]
+    },
+    "exports": ["wasmcloud:host/workload-lifecycle@0.1.6"],
+    "forbiddenImports": ["wasi:tls/client@0.3.0-draft"],
+    "license": "Apache-2.0"
+  },
+  {
+    "id": "couchbase-wasi-sockets-p3",
+    "kind": "component",
+    "releaseGroup": "couchbase",
+    "directory": "host-plugins/component/couchbase-wasi-sockets-p3",
+    "binary": "couchbase_wasi_sockets_p3_plugin",
+    "contracts": {
+      "couchbase-wit": ["types", "sqlpp-types", "document-read", "document-write", "sqlpp"]
+    },
+    "exports": ["wasmcloud:host/workload-lifecycle@0.1.6"],
+    "forbiddenImports": ["wasi:tls/client@0.3.0-draft"],
+    "license": "Apache-2.0"
+  },
+  {
+    "id": "couchbase-wasi-sockets-p3-tls",
+    "kind": "component",
+    "releaseGroup": "couchbase",
+    "directory": "host-plugins/component/couchbase-wasi-sockets-p3",
+    "binary": "couchbase_wasi_sockets_p3_plugin",
+    "features": ["tls"],
+    "contracts": {
+      "couchbase-wit": ["types", "sqlpp-types", "document-read", "document-write", "sqlpp"]
+    },
+    "exports": ["wasmcloud:host/workload-lifecycle@0.1.6"],
+    "imports": ["wasi:tls/client@0.3.0-draft"],
+    "license": "Apache-2.0"
+  }
+]

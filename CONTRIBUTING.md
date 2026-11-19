@@ -49,6 +49,10 @@ Both routes:
 - **A working build** from a clean checkout, using `wash build` or a documented equivalent. Say which wasmCloud or `wash` version you tested against.
 - **Maintenance.** You maintain your project. Entries that stop building against current wasmCloud releases may be removed. That is upkeep, not a judgment of the work.
 
+To publish hosted WIT packages and Rust components to GHCR, register them in
+[`.github/artifacts.json`](.github/artifacts.json).
+See [Publishing](PUBLISHING.md) for release groups, feature variants, and provenance verification.
+
 Hosted projects additionally:
 
 - **Committed source, not artifacts.** No `target/`, `node_modules/`, `dist/`, or built `.wasm` files.

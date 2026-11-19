@@ -66,6 +66,23 @@ async calls and adapting document values to owned bytes plus flags.
 
 ## Build
 
+Prebuilt plugins and the WIT package are published to GHCR:
+
+| Artifact | Reference |
+|---|---|
+| WIT contract | `ghcr.io/wasmcloud/interfaces/wasmcloud/couchbase:0.3.0` |
+| Data API plugin | `ghcr.io/wasmcloud/components/couchbase:0.1.0` |
+| KV socket plugin | `ghcr.io/wasmcloud/components/couchbase-wasi-sockets-p3:0.1.0` |
+| KV socket plugin with TLS | `ghcr.io/wasmcloud/components/couchbase-wasi-sockets-p3-tls:0.1.0` |
+
+The TLS variant requires a host with the upstream
+[component plugin TLS fix](https://github.com/wasmCloud/wasmCloud/pull/6014)
+and both `host-component-plugins` and `wasi-tls` enabled.
+See the [socket plugin's TLS requirements](../couchbase-wasi-sockets-p3/README.md#tls)
+before selecting a host release.
+
+To build from source instead:
+
 ```console
 wash build
 ```
@@ -101,7 +118,7 @@ nothing. Use the config-file form. In `.wash/config.yaml`:
 host:
   hostPlugins:
     - id: couchbase
-      file: ./host-plugins/component/couchbase/target/wasm32-wasip2/release/couchbase_plugin.wasm
+      image: ghcr.io/wasmcloud/components/couchbase:0.1.0
       allowedHosts:
         - "*.data.cloud.couchbase.com"
 ```
@@ -142,19 +159,9 @@ Because a capability call into a plugin has **no host-imposed timeout**, this
 
 ## Using it from a workload
 
-Resolve [`interface/couchbase.wit`](interface/couchbase.wit) through a local
-`wit.sources` entry in your workload's wash configuration, then import only the
-capabilities it needs:
-
-For a workload alongside this checkout, add to `.wash/config.yaml`:
-
-```yaml
-wit:
-  sources:
-    "wasmcloud:couchbase": ../awesome-wasmcloud/host-plugins/component/couchbase/interface
-```
-
-Then run `wash wit fetch` and declare the required imports:
+Declare the required imports in your workload's WIT, then run `wash wit fetch`.
+Normal wash registry resolution fetches `wasmcloud:couchbase@0.3.0` from GHCR;
+no checkout or `wit.sources` override is needed.
 
 ```wit
 world my-app {
@@ -165,6 +172,15 @@ world my-app {
     import wasmcloud:couchbase/sqlpp-types@0.3.0;
     export wasi:http/handler@0.3.0;
 }
+```
+
+When developing changes to the contract locally, override the published package
+with [`interface/couchbase.wit`](interface/couchbase.wit):
+
+```yaml
+wit:
+  sources:
+    "wasmcloud:couchbase": ../awesome-wasmcloud/host-plugins/component/couchbase/interface
 ```
 
 Records generated from WIT carry no `Default`, and 0.1.0-draft's option records
