@@ -65,7 +65,7 @@ test('Cargo config cannot redirect component artifacts away from local targets',
   mkdirSync(bin);
   // Use real Cargo configuration resolution with dependency-free native crates.
   writeFileSync(join(bin, 'wash'), `#!/usr/bin/env node
-require('node:child_process').execFileSync('cargo', ['+1.96.0', 'build', '--quiet', '--offline'], { stdio: 'inherit' });
+require('node:child_process').execFileSync('cargo', ['build', '--quiet', '--offline'], { stdio: 'inherit' });
 `, { mode: 0o755 });
   const configured = join(directory, 'configured-target');
   const projects = ['plugin', 'caller'].map(name => {

@@ -21,7 +21,7 @@ node --test tests/verify-components.test.mjs
 These tests cover build output isolation from environment and Cargo configuration,
 fragmented HTTP status lines,
 response bounds, premature EOF and probe deadlines.
-The Cargo configuration regression uses Rust 1.96 with dependency-free test crates.
+The Cargo configuration regression uses the active Rust toolchain with dependency-free test crates.
 
 Run the live protocol checks from the repository root:
 
