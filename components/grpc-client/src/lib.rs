@@ -6,7 +6,7 @@
 //! and `grpc-message` response headers — which is where it belongs, since a
 //! failed RPC is still `HTTP 200`.
 //!
-//! The transport is [`grpc`], which is the part worth copying: it knows nothing
+//! The transport is `grpc`, which is the part worth copying: it knows nothing
 //! about this component, or about protobuf.
 //!
 //! Approach credit: Laurent Doguin's `wasmcloud-couchbase-cng-conduit`
@@ -16,6 +16,8 @@
 
 pub mod deadline;
 pub mod protocol;
+#[path = "../../../host-plugins/component/couchbase/src/transport.rs"]
+pub mod transport;
 
 #[cfg(target_family = "wasm")]
 mod bindings {

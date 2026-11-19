@@ -113,6 +113,7 @@ impl Guest for Probe {
                 "query-context" => "SELECT RAW \"query-context\"",
                 "query-timeout" => "SELECT RAW \"query-timeout\"",
                 "query-timeout-http" => "SELECT RAW \"query-timeout-http\"",
+                "query-oversized" => "SELECT RAW \"query-oversized\"",
                 _ => "SELECT RAW 1",
             };
             match sqlpp::query(statement.into(), vec![], None).await {

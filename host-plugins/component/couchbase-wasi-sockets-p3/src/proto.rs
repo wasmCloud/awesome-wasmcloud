@@ -1,6 +1,6 @@
 //! The Couchbase KV binary protocol: framing, key encoding, and routing.
 //!
-//! Bindings-free, so it compiles and tests on the host. [`crate::conn`] moves
+//! Bindings-free, so it compiles and tests on the host. `conn` moves
 //! these bytes over a socket; nothing here knows how.
 //!
 //! # The two rules that are easy to get wrong
@@ -94,9 +94,11 @@ pub fn expiry_seconds(expires_in_ns: u64, now: impl FnOnce() -> i64) -> Result<u
         seconds
     } else {
         let now = u64::try_from(now()).map_err(|_| "the system clock is before the Unix epoch")?;
-        now.checked_add(seconds).ok_or("expiry timestamp overflowed")?
+        now.checked_add(seconds)
+            .ok_or("expiry timestamp overflowed")?
     };
-    u32::try_from(expiry).map_err(|_| "expiry is beyond the KV protocol's timestamp range".to_string())
+    u32::try_from(expiry)
+        .map_err(|_| "expiry is beyond the KV protocol's timestamp range".to_string())
 }
 
 /// A parsed response header.
@@ -130,8 +132,8 @@ impl ResponseHeader {
             body_len: u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize,
             opaque: u32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
             cas: u64::from_be_bytes([
-                bytes[16], bytes[17], bytes[18], bytes[19],
-                bytes[20], bytes[21], bytes[22], bytes[23],
+                bytes[16], bytes[17], bytes[18], bytes[19], bytes[20], bytes[21], bytes[22],
+                bytes[23],
             ]),
         };
         if header.extras_len + header.key_len > header.body_len {
@@ -286,7 +288,9 @@ pub fn parse_collection_id(extras: &[u8]) -> Result<u32, String> {
     if extras.len() < 12 {
         return Err(format!("collection-id extras too short: {}", extras.len()));
     }
-    Ok(u32::from_be_bytes([extras[8], extras[9], extras[10], extras[11]]))
+    Ok(u32::from_be_bytes([
+        extras[8], extras[9], extras[10], extras[11],
+    ]))
 }
 
 /// How many vbuckets the cluster has, from a `GET_CLUSTER_CONFIG` body.
@@ -314,12 +318,11 @@ pub fn parse_mutation_token(extras: &[u8]) -> Option<(u64, u64)> {
         return None;
     }
     let uuid = u64::from_be_bytes([
-        extras[0], extras[1], extras[2], extras[3],
-        extras[4], extras[5], extras[6], extras[7],
+        extras[0], extras[1], extras[2], extras[3], extras[4], extras[5], extras[6], extras[7],
     ]);
     let seqno = u64::from_be_bytes([
-        extras[8], extras[9], extras[10], extras[11],
-        extras[12], extras[13], extras[14], extras[15],
+        extras[8], extras[9], extras[10], extras[11], extras[12], extras[13], extras[14],
+        extras[15],
     ]);
     Some((uuid, seqno))
 }
@@ -524,7 +527,10 @@ mod tests {
         assert!(features.contains(&feature::COLLECTIONS));
         assert!(features.contains(&feature::MUTATION_SEQNO));
         assert!(features.contains(&feature::JSON));
-        assert!(features.contains(&feature::XERROR), "or a refused privilege drops the connection");
+        assert!(
+            features.contains(&feature::XERROR),
+            "or a refused privilege drops the connection"
+        );
     }
 
     #[test]
@@ -549,7 +555,10 @@ mod tests {
         let mut extras = Vec::new();
         extras.extend_from_slice(&0x1234_5678_9abc_def0u64.to_be_bytes());
         extras.extend_from_slice(&42u64.to_be_bytes());
-        assert_eq!(parse_mutation_token(&extras), Some((0x1234_5678_9abc_def0, 42)));
+        assert_eq!(
+            parse_mutation_token(&extras),
+            Some((0x1234_5678_9abc_def0, 42))
+        );
         // Without MUTATION_SEQNO the server sends nothing, which is not the
         // same as a token of zeroes.
         assert_eq!(parse_mutation_token(&[]), None);
@@ -563,7 +572,7 @@ mod tests {
         assert_eq!(parse_meta_expiry(&extras), Some(1_700_000_000));
         // A document with no expiry reports zero, which is absence rather than
         // the epoch.
-        assert_eq!(parse_meta_expiry(&vec![0u8; 20]), None);
+        assert_eq!(parse_meta_expiry(&[0u8; 20]), None);
         assert_eq!(parse_meta_expiry(&[0u8; 4]), None);
     }
 
@@ -571,22 +580,50 @@ mod tests {
     fn converts_unix_seconds_to_a_civil_date() {
         assert_eq!(
             civil_from_unix(0),
-            Civil { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0 }
+            Civil {
+                year: 1970,
+                month: 1,
+                day: 1,
+                hour: 0,
+                minute: 0,
+                second: 0
+            }
         );
         // 2026-09-22T17:04:05Z
         assert_eq!(
             civil_from_unix(1_790_096_645),
-            Civil { year: 2026, month: 9, day: 22, hour: 17, minute: 4, second: 5 }
+            Civil {
+                year: 2026,
+                month: 9,
+                day: 22,
+                hour: 17,
+                minute: 4,
+                second: 5
+            }
         );
         // A leap day, which the era arithmetic has to place correctly.
         assert_eq!(
             civil_from_unix(1_709_164_800),
-            Civil { year: 2024, month: 2, day: 29, hour: 0, minute: 0, second: 0 }
+            Civil {
+                year: 2024,
+                month: 2,
+                day: 29,
+                hour: 0,
+                minute: 0,
+                second: 0
+            }
         );
         // The last second before a year rolls over.
         assert_eq!(
             civil_from_unix(1_735_689_599),
-            Civil { year: 2024, month: 12, day: 31, hour: 23, minute: 59, second: 59 }
+            Civil {
+                year: 2024,
+                month: 12,
+                day: 31,
+                hour: 23,
+                minute: 59,
+                second: 59
+            }
         );
     }
 

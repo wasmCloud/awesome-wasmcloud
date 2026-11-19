@@ -1,6 +1,16 @@
 //! Bindings-free gRPC framing and response validation.
 
+/// Maximum protobuf bytes in one request or response message.
+pub const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum wire bytes across all frames in a response.
+pub const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+/// Bound metadata overhead even when response messages are empty.
+pub const MAX_RESPONSE_FRAMES: usize = 1024;
+
 pub fn frame(message: &[u8]) -> Result<Vec<u8>, String> {
+    if message.len() > MAX_MESSAGE_BYTES {
+        return Err("gRPC message exceeds the 4 MiB message limit".into());
+    }
     let length = u32::try_from(message.len()).map_err(|_| "gRPC message exceeds u32 length")?;
     let capacity = message
         .len()
@@ -14,25 +24,84 @@ pub fn frame(message: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 pub fn split_frames(body: &[u8]) -> Result<Vec<Vec<u8>>, String> {
-    let mut frames = Vec::new();
-    let mut pos = 0;
-    while pos < body.len() {
-        let header = body[pos..].get(..5).ok_or("truncated gRPC frame header")?;
-        match header[0] {
-            0 => {}
-            1 => return Err("compressed gRPC messages are not supported".into()),
-            _ => return Err("invalid gRPC compression flag".into()),
+    let mut decoder = FrameDecoder::default();
+    decoder.push(body)?;
+    decoder.finish()
+}
+
+/// Decode across arbitrary stream boundaries without a second whole-body copy.
+/// Declared message lengths and frame counts are checked before retaining data.
+#[derive(Default)]
+pub(crate) struct FrameDecoder {
+    header: [u8; 5],
+    header_len: usize,
+    remaining: Option<usize>,
+    message: Vec<u8>,
+    frames: Vec<Vec<u8>>,
+    wire_bytes: usize,
+}
+
+impl FrameDecoder {
+    pub(crate) fn push(&mut self, mut bytes: &[u8]) -> Result<(), String> {
+        if bytes.len() > MAX_RESPONSE_BYTES - self.wire_bytes {
+            return Err("gRPC response exceeds the 32 MiB body limit".into());
         }
-        let length = u32::from_be_bytes(header[1..5].try_into().expect("four bytes")) as usize;
-        pos = pos.checked_add(5).ok_or("gRPC frame offset overflow")?;
-        let end = pos
-            .checked_add(length)
-            .ok_or("gRPC frame length overflow")?;
-        let message = body.get(pos..end).ok_or("truncated gRPC message")?;
-        frames.push(message.to_vec());
-        pos = end;
+        self.wire_bytes += bytes.len();
+        while !bytes.is_empty() {
+            if let Some(remaining) = self.remaining {
+                let take = remaining.min(bytes.len());
+                self.message.extend_from_slice(&bytes[..take]);
+                bytes = &bytes[take..];
+                self.remaining = Some(remaining - take);
+            } else {
+                let take = (5 - self.header_len).min(bytes.len());
+                self.header[self.header_len..self.header_len + take]
+                    .copy_from_slice(&bytes[..take]);
+                self.header_len += take;
+                bytes = &bytes[take..];
+                if self.header_len < 5 {
+                    continue;
+                }
+                match self.header[0] {
+                    0 => {}
+                    1 => return Err("compressed gRPC messages are not supported".into()),
+                    _ => return Err("invalid gRPC compression flag".into()),
+                }
+                let length = u32::from_be_bytes([
+                    self.header[1],
+                    self.header[2],
+                    self.header[3],
+                    self.header[4],
+                ]) as usize;
+                if length > MAX_MESSAGE_BYTES {
+                    return Err("gRPC message exceeds the 4 MiB message limit".into());
+                }
+                if self.frames.len() >= MAX_RESPONSE_FRAMES {
+                    return Err("gRPC response exceeds the 1024-frame limit".into());
+                }
+                // The validated length caps capacity, avoiding geometric
+                // growth beyond the per-message budget on split frames.
+                self.message = Vec::with_capacity(length);
+                self.remaining = Some(length);
+            }
+            if self.remaining == Some(0) {
+                self.frames.push(std::mem::take(&mut self.message));
+                self.remaining = None;
+                self.header_len = 0;
+            }
+        }
+        Ok(())
     }
-    Ok(frames)
+
+    pub(crate) fn finish(self) -> Result<Vec<Vec<u8>>, String> {
+        if self.remaining.is_some() {
+            return Err("truncated gRPC message".into());
+        }
+        if self.header_len != 0 {
+            return Err("truncated gRPC frame header".into());
+        }
+        Ok(self.frames)
+    }
 }
 
 /// The wire timeout has at most eight decimal digits. Round up when changing
@@ -96,9 +165,9 @@ pub fn response_status(
         .trim()
         .to_ascii_lowercase();
     if content_type != "application/grpc"
-        && !content_type
+        && content_type
             .strip_prefix("application/grpc+")
-            .is_some_and(|suffix| !suffix.is_empty())
+            .is_none_or(|suffix| suffix.is_empty())
     {
         return Err("response is not a gRPC content-type".into());
     }
@@ -125,6 +194,48 @@ pub fn response_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn incremental_frames_handle_every_boundary_and_empty_messages() -> Result<(), String> {
+        let wire = [frame(b"one")?, frame(b"")?, frame(b"two")?].concat();
+        for size in 1..=wire.len() {
+            let mut decoder = FrameDecoder::default();
+            for chunk in wire.chunks(size) {
+                decoder.push(chunk)?;
+            }
+            assert_eq!(
+                decoder.finish()?,
+                vec![b"one".to_vec(), vec![], b"two".to_vec()]
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn stream_limits_reject_headers_and_empty_frame_floods_before_buffering() -> Result<(), String>
+    {
+        let mut oversized = vec![0];
+        oversized.extend_from_slice(&((MAX_MESSAGE_BYTES + 1) as u32).to_be_bytes());
+        assert!(FrameDecoder::default()
+            .push(&oversized)
+            .is_err_and(|error| error.contains("4 MiB")));
+        let mut decoder = FrameDecoder::default();
+        for _ in 0..MAX_RESPONSE_FRAMES {
+            decoder.push(&[0; 5])?;
+        }
+        assert!(decoder
+            .push(&[0; 5])
+            .is_err_and(|error| error.contains("1024-frame")));
+        assert!(frame(&vec![0; MAX_MESSAGE_BYTES + 1]).is_err());
+        let mut decoder = FrameDecoder::default();
+        let message = frame(&vec![0; MAX_MESSAGE_BYTES])?;
+        for _ in 0..7 {
+            decoder.push(&message)?;
+        }
+        assert!(decoder
+            .push(&message)
+            .is_err_and(|error| error.contains("32 MiB")));
+        Ok(())
+    }
     fn fields(pairs: &[(&str, &str)]) -> Vec<(String, Vec<u8>)> {
         pairs
             .iter()

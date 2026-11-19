@@ -9,6 +9,8 @@ beyond the `wasi:http/client@0.3.0` it already has. The conventions are the
 work, and [`src/grpc.rs`](src/grpc.rs), [`src/protocol.rs`](src/protocol.rs), and
 [`src/deadline.rs`](src/deadline.rs) form the reusable transport. They know
 nothing about this HTTP frontend, or about protobuf.
+They reuse the bounded HTTP stream reader in
+[`transport.rs`](../../host-plugins/component/couchbase/src/transport.rs).
 
 ## The part that is easy to get wrong
 
@@ -38,12 +40,24 @@ POST /<package>.<Service>/<Method>
      grpc-http-status: the transport's status, 200 even for a failed RPC
 400  the path is not a gRPC method path
 405  method is not POST; Allow: POST
+408  incoming upload or its completion exceeded the overall deadline
+413  incoming request exceeded 4 MiB
 500  GRPC_AUTHORITY is not set
 502  transport/deadline failure, malformed gRPC response, or unsupported compression
 ```
 
 The body is the first frame. A server-streaming call reports its count in
-`grpc-frames`; use `grpc::split_frames` directly to read them all.
+`grpc-frames`; use `protocol::split_frames` directly to read them all.
+
+Bodies are read in chunks with backpressure.
+The gRPC decoder handles partial headers and messages as bytes arrive,
+with a 4 MiB limit per message, 32 MiB per response body, and 1024 response frames.
+It validates declared lengths before retaining payload bytes.
+The frontend reads at most 4 MiB of input before framing it;
+fixed-length and chunked uploads use the same limit.
+Its deadline starts before reading the upload and includes body completion.
+The outgoing RPC receives only the remaining time.
+No response is returned as successful until its body completion and gRPC status are validated.
 
 Encoding and decoding protobuf is the caller's job — with `prost`, or by hand
 for a message this small. Nothing here depends on a protobuf crate.
@@ -54,7 +68,7 @@ for a message this small. Nothing here depends on a protobuf crate.
 |---|---|---|---|
 | `GRPC_AUTHORITY` | yes | — | The endpoint, as `host:port` |
 | `GRPC_PLAINTEXT` | no | unset | `1` for `http://`. Plaintext is opt-in so a missing variable cannot silently downgrade TLS |
-| `GRPC_TIMEOUT_MS` | no | `30000` | Positive integer; overall outgoing RPC deadline, including its response body. Also sent as `grpc-timeout` |
+| `GRPC_TIMEOUT_MS` | no | `30000` | Positive integer; deadline for the incoming upload and complete RPC response. Remaining time is sent as `grpc-timeout` |
 
 The endpoint also has to be in the workload's `allowedHosts`.
 
@@ -111,12 +125,17 @@ Build a `couchbase.kv.v1.GetRequest` — four length-delimited string fields —
 call it:
 
 ```console
-python3 -c '
-def f(n, v):
-    b = v.encode(); return bytes([(n << 3) | 2, len(b)]) + b
-import sys
-sys.stdout.buffer.write(f(1,"testbucket")+f(2,"_default")+f(3,"_default")+f(4,"my-doc"))
-' > get.bin
+node --input-type=module > get.bin <<'JS'
+// These example fields all fit in a one-byte protobuf length.
+const field = (number, value) => {
+  const bytes = Buffer.from(value);
+  return Buffer.concat([Buffer.from([(number << 3) | 2, bytes.length]), bytes]);
+};
+process.stdout.write(Buffer.concat([
+  field(1, 'testbucket'), field(2, '_default'),
+  field(3, '_default'), field(4, 'my-doc'),
+]));
+JS
 
 wash dev
 curl -sD - --data-binary @get.bin -u user:pass \
