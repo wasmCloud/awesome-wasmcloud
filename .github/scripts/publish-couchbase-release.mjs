@@ -16,21 +16,34 @@ export function classify(status, manifest, expected) {
   return manifest.layers[0].digest === expected ? 'attest' : 'different';
 }
 
-export async function probe(repository, tag, { anonymous = false, request = fetch } = {}) {
+export async function probe(repository, tag, { anonymous = false, request = fetch,
+  user = process.env.GITHUB_ACTOR, credential = process.env.REGISTRY_TOKEN } = {}) {
   if (!/^wasmcloud\/[a-z0-9/-]+$/.test(repository) || !/^[A-Za-z0-9_.:-]+$/.test(tag)) {
     throw new Error('Invalid registry reference');
   }
   const headers = {};
   if (!anonymous) {
-    const user = process.env.GITHUB_ACTOR;
-    const token = process.env.REGISTRY_TOKEN;
-    if (!user || !token) throw new Error('Authenticated publication requires GITHUB_ACTOR and REGISTRY_TOKEN');
-    headers.Authorization = `Basic ${Buffer.from(`${user}:${token}`).toString('base64')}`;
+    if (!user || !credential) throw new Error('Authenticated publication requires GITHUB_ACTOR and REGISTRY_TOKEN');
+    headers.Authorization = `Basic ${Buffer.from(`${user}:${credential}`).toString('base64')}`;
   }
   const auth = await request(`https://ghcr.io/token?service=ghcr.io&scope=repository:${repository}:pull`, {
     headers, signal: AbortSignal.timeout(30_000), redirect: 'error',
   });
-  if (!auth.ok) throw new Error(`GHCR token request failed (HTTP ${auth.status})`);
+  if (!auth.ok) {
+    // GHCR may deny a pull token before a package's first push. Require an
+    // authenticated GitHub package lookup to confirm absence, rather than
+    // treating every authentication/network error as permission to overwrite.
+    if (!anonymous && [403, 404].includes(auth.status)) {
+      const pkg = encodeURIComponent(repository.slice('wasmcloud/'.length));
+      const existing = await request(`https://api.github.com/orgs/wasmcloud/packages/container/${pkg}`, {
+        headers: { Authorization: `Bearer ${credential}`, Accept: 'application/vnd.github+json' },
+        signal: AbortSignal.timeout(30_000), redirect: 'error',
+      });
+      if (existing.status === 404) return { status: 404 };
+      throw new Error(`Cannot confirm package absence (GitHub HTTP ${existing.status})`);
+    }
+    throw new Error(`GHCR token request failed (HTTP ${auth.status})`);
+  }
   const token = (await auth.json()).token;
   if (typeof token !== 'string' || !token) throw new Error('GHCR returned no registry token');
   const res = await request(`https://ghcr.io/v2/${repository}/manifests/${tag}`, {

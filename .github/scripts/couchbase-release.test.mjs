@@ -62,3 +62,24 @@ test('failed token requests never become permission to publish', async () => {
   await assert.rejects(probe('../bad', '0.3.0', { anonymous: true }), /Invalid registry/);
   await assert.rejects(probe(artifacts.wit.repository, 'tag\n', { anonymous: true }), /Invalid registry/);
 });
+
+test('first publication requires an authenticated absence check', async () => {
+  for (const status of [200, 401, 403, 429, 503]) {
+    let count = 0;
+    const request = async () => new Response('', { status: ++count === 1 ? 403 : status });
+    await assert.rejects(probe(artifacts.http.repository, '0.1.0', {
+      user: 'publisher', credential: 'test-only', request,
+    }), /Cannot confirm package absence/);
+  }
+  const requests = [];
+  const request = async (url, options) => {
+    requests.push({ url, ...options });
+    return new Response('', { status: requests.length === 1 ? 403 : 404 });
+  };
+  assert.deepEqual(await probe(artifacts.http.repository, '0.1.0', {
+    user: 'publisher', credential: 'test-only', request,
+  }), { status: 404 });
+  assert.equal(requests[1].url, 'https://api.github.com/orgs/wasmcloud/packages/container/components%2Fcouchbase');
+  assert.equal(requests[1].headers.Authorization, 'Bearer test-only');
+  assert.equal(requests[1].redirect, 'error');
+});
