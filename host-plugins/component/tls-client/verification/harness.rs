@@ -4,7 +4,7 @@ mod tls;
 mod tests {
     fn example_root() -> std::path::PathBuf {
         std::env::var_os("TLS_EXAMPLE_ROOT")
-            .expect("set by run.py")
+            .expect("set by run.mjs")
             .into()
     }
     use super::tls::{

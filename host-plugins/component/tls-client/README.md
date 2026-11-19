@@ -76,7 +76,7 @@ It also tests denial when that plugin grant is absent.
 
 ## Build and verify
 
-Requires Rust with `wasm32-wasip2`, `wash`, Git, Python 3.11+, and a C toolchain
+Requires Rust with `wasm32-wasip2`, `wash`, Git, Node.js 22+, and a C toolchain
 for the native host's TLS dependencies. Run from this directory:
 
 ```sh
@@ -93,11 +93,11 @@ git clone https://github.com/wasmCloud/wasmCloud.git "$TLS_RUNTIME_DIR"
 git -C "$TLS_RUNTIME_DIR" checkout 86e98479cf8336f563e68f66d6ee6c0b8924b2c9
 git -C "$TLS_RUNTIME_DIR" apply --check "$PWD/verification/runtime.patch"
 git -C "$TLS_RUNTIME_DIR" apply "$PWD/verification/runtime.patch"
-python3 verification/run.py --runtime-source "$TLS_RUNTIME_DIR" --skip-build
+node verification/run.mjs --runtime-source "$TLS_RUNTIME_DIR" --skip-build
 )
 ```
 
-`verification/run.py` builds both components unless `--skip-build` is supplied.
+`verification/run.mjs` builds both components unless `--skip-build` is supplied.
 It creates a temporary native harness, starts real component-plugin and caller
 stores, and uses local TLS peers on dynamically allocated ports. No Docker,
 database, public endpoint, or real credentials are required.

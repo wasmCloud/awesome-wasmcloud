@@ -15,10 +15,10 @@ that identify invalid configuration keys without exposing their values.
 Run the live protocol checks from the repository root:
 
 ```sh
-python3 tests/verify_components.py
+node tests/verify-components.mjs
 ```
 
-Requires Python 3, OpenSSL, Docker, Rust with `wasm32-wasip2`, and `wash`.
+Requires Node.js 22+, OpenSSL, Docker, Rust with `wasm32-wasip2`, and `wash`.
 `--skip-build` uses existing artifacts. `--host-image` selects an alternate
 all-features host image; the default is `ghcr.io/wasmcloud/wash:2.12.1-all-features`.
 The synthetic peer uses `node:22-alpine`. No cloud account or Couchbase credentials
@@ -35,6 +35,8 @@ The suite covers:
 | gRPC protocol | Missing, invalid and contradictory status; HTTP failures; wrong content type |
 | Frontend | POST-only dispatch, `Allow: POST`, invalid paths/configuration, incomplete incoming bodies never forwarded |
 | Deadlines | A peer trickling bytes cannot extend the whole-call deadline |
+| Stream bounds | Fixed-length and chunked uploads over 4 MiB return 413 before dispatch; stalled/trickling uploads return 408; oversized gRPC headers, frame floods and response bodies fail without poisoning the instance |
+| HTTP response bounds | Data API and SQL++ responses are read incrementally and refused above 32 MiB, including chunked bodies |
 | Egress and TLS | Denied host, untrusted CA and wrong certificate hostname fail before an RPC is dispatched |
 | Data API | Complete, truncated, stalled and trickling document bodies |
 | KV metadata | A concurrent replacement retries to a matching CAS; continuous changes time out; metadata denial and malformed metadata return errors; absent TTL remains absent |
@@ -85,10 +87,13 @@ Query context identifiers are quoted so a dot in a bucket name remains part of
 that name. Both transports round TTLs up to whole seconds and refuse expiries
 beyond Couchbase's unsigned 32-bit Unix timestamp range, which ends in 2106.
 
-The gRPC transport handles uncompressed response messages and buffers a complete
-response. Compression and malformed protocol messages are rejected. Its Rust
+The gRPC transport decodes uncompressed response messages as stream chunks arrive.
+Messages are limited to 4 MiB, response bodies to 32 MiB, and responses to 1024 frames.
+Compression and malformed protocol messages are rejected. Its Rust
 transport returns all server-streamed frames; the HTTP frontend returns the first
 message and reports the total in `grpc-frames`. Client and bidirectional streaming
 are not implemented. TLS validates the certificate and hostname against the host's
-trust configuration. The deadline covers the complete outgoing RPC, and is also
-sent to the server through `grpc-timeout`.
+trust configuration. The frontend's deadline includes the incoming upload and body completion;
+only the remaining time is sent to the server through `grpc-timeout`.
+The Data API and SQL++ interfaces return complete values, so their stream readers
+retain at most 32 MiB of body bytes before decoding a result.
