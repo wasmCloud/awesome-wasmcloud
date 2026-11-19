@@ -24,6 +24,17 @@ function run(command, args, options = {}) {
   return execFileSync(command, args, { encoding: 'utf8', timeout: 180_000, ...options })?.trim() ?? '';
 }
 
+export function buildComponents(projects, environment = process.env) {
+  // The fixture loads each project's configured local target path.
+  for (const project of projects) {
+    run('wash', ['build'], {
+      cwd: project,
+      env: { ...environment, CARGO_TARGET_DIR: resolve(project, 'target') },
+      stdio: 'inherit',
+    });
+  }
+}
+
 function request(port, path, { method = 'POST', body = Buffer.alloc(0), headers = {} } = {}) {
   return new Promise((resolveRequest, reject) => {
     const requestHeaders = { ...headers };
@@ -47,26 +58,40 @@ function request(port, path, { method = 'POST', body = Buffer.alloc(0), headers 
   });
 }
 
-function rawUpload(port, path, { incomplete = false, trickle = false } = {}) {
+export function rawUpload(port, path, { incomplete = false, trickle = false } = {}) {
   return new Promise((resolveUpload, reject) => {
     const socket = net.connect({ host: '127.0.0.1', port });
     let interval;
+    let deadline;
     let settled = false;
+    const statusLine = Buffer.alloc(8192);
+    let received = 0;
     const finish = (error, bytes = Buffer.alloc(0)) => {
       if (settled) return;
       settled = true;
       clearInterval(interval);
+      clearTimeout(deadline);
       socket.destroy();
       if (error) reject(error); else resolveUpload(bytes.toString());
     };
-    socket.setTimeout(3000, () => finish(new Error('raw upload did not terminate')));
+    // A wall-clock deadline also bounds an active trickling connection.
+    deadline = setTimeout(() => finish(new Error('raw upload did not terminate')), 3000);
     socket.on('connect', () => {
       socket.write(`POST ${path} HTTP/1.1\r\nHost: test\r\nContent-Length: 1000000\r\nConnection: close\r\n\r\nabc`);
       if (incomplete) socket.end();
       if (trickle) interval = setInterval(() => socket.write('x'), 20);
     });
-    socket.once('data', bytes => finish(null, bytes));
-    socket.once('end', () => finish());
+    socket.on('data', bytes => {
+      const searchFrom = Math.max(0, received - 1);
+      received += bytes.copy(statusLine, received);
+      const end = statusLine.subarray(0, received).indexOf('\r\n', searchFrom);
+      if (end !== -1) finish(null, statusLine.subarray(0, end + 2));
+      else if (received === statusLine.length) finish(new Error('HTTP status line exceeds 8 KiB'));
+    });
+    socket.once('end', () => {
+      if (incomplete) finish();
+      else finish(new Error('peer closed before a complete HTTP status line'));
+    });
     socket.once('error', error => incomplete ? finish() : finish(error));
   });
 }
@@ -329,7 +354,7 @@ async function main() {
     return;
   }
   if (!values['skip-build']) {
-    for (const project of [GRPC, CB, KV, PROBE]) run('wash', ['build'], { cwd: project, stdio: 'inherit' });
+    buildComponents([GRPC, CB, KV, PROBE]);
   }
   const directory = mkdtempSync(join(tmpdir(), 'component-check-'));
   const fixture = new Fixture(directory, values['host-image']);

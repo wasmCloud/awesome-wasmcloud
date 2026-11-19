@@ -12,6 +12,15 @@ The sockets tests also verify shared-connection ownership, teardown during an
 in-flight call or bind, credential rotation, failed-bind cleanup, and diagnostics
 that identify invalid configuration keys without exposing their values.
 
+Run the verification runner's regression tests without Docker:
+
+```sh
+node --test tests/verify-components.test.mjs
+```
+
+These tests cover build output isolation, fragmented HTTP status lines,
+response bounds, premature EOF and probe deadlines.
+
 Run the live protocol checks from the repository root:
 
 ```sh
@@ -25,6 +34,8 @@ The synthetic peer uses `node:22-alpine`. No cloud account or Couchbase credenti
 are needed. Containers receive temporary copies of the compiled components,
 public WIT, test certificates, and fixtures. The checkout is never mounted.
 Each run uses its own network and removes its containers afterward.
+Component builds use their project-local target directories,
+even when `CARGO_TARGET_DIR` is set in the calling environment.
 
 The suite covers:
 

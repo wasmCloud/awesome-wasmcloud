@@ -33,9 +33,10 @@ jobs:
           cargo +1.96.0 test --locked --manifest-path host-plugins/component/couchbase/Cargo.toml
           cargo +1.96.0 test --locked --manifest-path host-plugins/component/couchbase-wasi-sockets-p3/Cargo.toml
           cargo +1.96.0 test --locked --manifest-path host-plugins/component/tls-client/Cargo.toml
-      - name: Check verification runners
+      - name: Test verification runners
         run: |
           node --check tests/verify-components.mjs
           node --check tests/fixtures/server.js
           node --check host-plugins/component/tls-client/verification/run.mjs
           node --input-type=module -e "await import('./tests/verify-components.mjs'); await import('./host-plugins/component/tls-client/verification/run.mjs')"
+          node --test tests/verify-components.test.mjs
