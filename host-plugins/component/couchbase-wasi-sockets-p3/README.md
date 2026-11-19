@@ -100,6 +100,12 @@ unit test for precisely that, checked against what a live cluster serves.
 Each of these returns `unsupported` with a message naming the reason, rather
 than a wrong answer.
 
+For a runnable example of adding TLS to a host component plugin, see
+[`tls-client`](../tls-client/). It demonstrates verified `wasi:tls` stream
+wrapping, custom CA trust, certificate rejection and the required runtime
+plumbing. Its Couchbase adaptation notes explain where to attach those streams
+to this plugin; this plugin's current `couchbases://` behavior remains unchanged.
+
 Expiry reads compare the document and metadata CAS values and retry both reads
 when they disagree. The call deadline also bounds a continuously changing
 document; metadata failures are surfaced rather than reported as no expiry.

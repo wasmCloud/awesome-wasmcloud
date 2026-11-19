@@ -1,0 +1,10 @@
+package example:tls@0.1.0;
+/// A bounded one-shot exchange with a TLS echo peer. This teaches the TLS
+/// transport; it is not a general TCP proxy or a Couchbase client.
+interface client {
+    /// Send PING\r\n, close the TLS output, and return the peer's UTF-8 reply.
+    /// address is an IP literal and port (IPv6 in brackets). server-name is
+    /// the certificate identity and SNI name, usually the original DNS hostname.
+    /// The entire call is bounded to five seconds and the reply to 1024 bytes.
+    ping: async func(address: string, server-name: string) -> result<string, string>;
+}

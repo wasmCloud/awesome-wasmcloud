@@ -1,0 +1,10 @@
+[package]
+name = "tls-client-caller"
+version = "0.1.0"
+edition = "2021"
+publish = false
+[lib]
+crate-type = ["cdylib"]
+[dependencies]
+wit-bindgen = { version = "0.63.0", features = ["async-spawn", "inter-task-wakeup"] }
+[workspace]

@@ -50,6 +50,11 @@ It checks the actual service contract, including CRUD, binary flags, CAS,
 locking, expiry, SQL++ parameters, consistency tokens and durability. Run both
 suites when changing a transport.
 
+The separate [TLS host component plugin example](../host-plugins/component/tls-client/)
+has its own native verifier. It runs a caller through a real plugin store with
+trusted and rejected certificates, denied egress, handshake deadlines and reply
+bounds. Its README pins the runtime revision and documents the compatibility patch.
+
 ## Support boundaries
 
 These are capability examples, not complete Couchbase or gRPC SDKs.
