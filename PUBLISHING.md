@@ -1,52 +1,114 @@
-# Publishing Couchbase
+# Publishing WIT packages and components
 
-The [Couchbase release workflow](.github/workflows/couchbase-release.yml) builds
-the WIT contract, Data API plugin, KV socket plugin and KV socket plugin with TLS.
-Pull requests build and validate every artifact without publishing.
-The publish jobs use the repository's GitHub token, sign OCI manifest digests
-with GitHub build provenance, and verify anonymous pulls from GHCR.
-The WIT check also exercises `wash wit fetch` from a fresh consumer project.
+The [artifact workflow](.github/workflows/artifacts.yml) builds and publishes
+entries from [`.github/artifacts.json`](.github/artifacts.json).
+Add a catalog entry to publish another WIT package, Rust component, or Rust
+host component plugin; the workflows and scripts contain no project-specific logic.
+Pull requests build and validate every registered artifact without publishing.
+Rust builds use stable, run native tests with their configured features,
+and compile the component for `wasm32-wasip2` with committed dependency locks.
 
-The authoritative contract remains in
-[`host-plugins/component/couchbase/interface/`](host-plugins/component/couchbase/interface/).
-Its package declaration determines the WIT version, independently of the plugins.
-It publishes to `ghcr.io/wasmcloud/interfaces/wasmcloud/couchbase:<version>`,
-matching wash's default `wasmcloud` namespace registry.
-An existing version with different WIT fails the build before any components publish; bump the WIT version
-and update its consumers before releasing a changed contract.
-Unchanged WIT is reused without replacing its original metadata or provenance.
+## Register artifacts
 
-On pushes to `main`, components publish under
-`ghcr.io/wasmcloud/components/<name>:sha-<full-commit-sha>`.
-Versioned releases use `couchbase-v<version>` Git tags:
+Each entry names its source directory, license, and release group.
+WIT packages declare their package identity and interfaces for a consumer smoke test.
+Rust components name the Cargo library binary, optional Cargo features,
+and any required imports, exports, or forbidden imports.
+For example, a new package and plugin could be registered as:
+
+```json
+[
+  {
+    "id": "weather-wit",
+    "kind": "wit",
+    "releaseGroup": "weather",
+    "directory": "host-plugins/component/weather/interface",
+    "package": "example:weather",
+    "smokeImports": ["forecast"],
+    "license": "Apache-2.0"
+  },
+  {
+    "id": "weather",
+    "kind": "component",
+    "releaseGroup": "weather",
+    "directory": "host-plugins/component/weather",
+    "binary": "weather_plugin",
+    "contracts": { "weather-wit": ["forecast"] },
+    "license": "Apache-2.0"
+  }
+]
+```
+
+WIT files can be split across files in the source directory.
+Keep one authoritative source; the build stages it without committing a second copy.
+If dependencies need fetching, set `fetchFrom` to the wash project directory
+whose `wash wit fetch` populates that source directory's `deps/`.
+Commit its `wkg.lock` and any project wash configuration.
+
+A component's `contracts` map names registered WIT packages and the interfaces
+it must export at their source versions.
+Shared WIT dependencies are included when selecting a release, even when
+another release group owns that contract.
+Use `features` for variants and `imports`, `exports`, and `forbiddenImports`
+for their fully versioned interface requirements.
+Each variant has its own artifact id and image repository.
+A new entry's directory must contain the appropriate license file.
+
+## Versions and destinations
+
+A WIT declaration `package <namespace>:<name>@<version>;` publishes to
+`ghcr.io/wasmcloud/interfaces/<namespace>/<name>:<version>`.
+Its version is independent of the components implementing it.
+Different WIT at an existing version fails the preflight and authenticated publish checks.
+Unchanged WIT retains its original metadata and provenance.
+The consumer test fetches the published package through a remote OCI source.
+Set `defaultRegistry: true` when the namespace has a default wash registry resolver;
+that additionally proves `wash wit fetch` works without a source override.
+
+Rust components publish to `ghcr.io/wasmcloud/components/<id>`.
+On `main`, their tag is `sha-<full-commit-sha>`.
+Versions come from Cargo metadata, including inherited workspace versions.
+Release tags use `<releaseGroup>-v<version>`, for example:
 
 ```console
-git tag -a couchbase-v0.1.0 -m 'Release Couchbase plugins 0.1.0'
-git push origin couchbase-v0.1.0
+git tag -a weather-v0.1.0 -m 'Release weather 0.1.0'
+git push origin weather-v0.1.0
 ```
 
 Tag the reviewed commit you intend to release.
-The tag version must match both plugins' Cargo package versions.
-The three component names are `couchbase`, `couchbase-wasi-sockets-p3`, and
-`couchbase-wasi-sockets-p3-tls`.
-Existing component tags are immutable: different bytes require a new version.
-All publish jobs wait for native tests and all four artifact builds to pass.
-Publishing is restricted to this repository's `main` and release tags;
-manual runs on feature branches build without publishing.
+Only that group's artifacts and shared WIT dependencies are selected.
+Each selected component's Cargo version must match the tag.
+WIT keeps its own version; a release group containing only WIT uses its WIT version.
+All versions must be OCI-compatible SemVer, without build metadata.
+Unregistered release groups publish nothing.
+Manual runs on feature branches build without publishing.
+Existing version and commit tags are immutable: different bytes require a new version or commit.
 
-If GHCR creates a new package as private, an organization package administrator
-must make it public in its package settings and retain this repository's Actions access.
-If anonymous verification fails for that reason, make it public and rerun the
-failed publish job; matching artifacts are reused and attestation can resume.
+## Attestations and access
 
-To inspect the same build locally, install stable Rust with `wasm32-wasip2`,
-wash and wasm-tools, then run, for example:
+The [reusable publisher](.github/workflows/publish-artifact.yml) handles every artifact.
+All builds must pass before publication, and WIT packages must publish and verify
+successfully before components publish.
+The jobs use the repository's GitHub token, attest OCI manifest digests,
+push provenance bundles to GHCR, and verify anonymous pulls.
+They also verify attestations from both GitHub and GHCR.
+New attestations must match the reusable workflow and source commit;
+reused WIT retains its original, verified repository provenance.
+Publication runs are serialized to protect immutable version checks.
+
+For an existing package, grant this repository's Actions write access in the
+package's settings before publishing from it.
+If GHCR creates a new package as private, a package administrator must make it public.
+Then rerun the failed publish jobs: matching artifacts are reused and attestation can resume.
+
+Run the same helpers locally with an id from the catalog:
 
 ```console
-node .github/scripts/build-couchbase-release.mjs wit
-node .github/scripts/build-couchbase-release.mjs tls
+node .github/scripts/plan-artifacts.mjs
+node .github/scripts/build-artifact.mjs weather-wit
+node .github/scripts/build-artifact.mjs weather
 node --test .github/scripts/*.test.mjs
 ```
 
-TLS releases require the host's upstream component plugin TLS support;
-publishing a TLS component does not add that support to older host binaries.
+Publishing a component does not change its runtime requirements.
+See each project's README for host features, TLS support, and deployment configuration.

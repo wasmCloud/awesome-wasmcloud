@@ -3,10 +3,18 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { artifact, output, releaseTag, run, versionOf } from './lib/couchbase-release.mjs';
+import { artifact, builtVersion, output, releaseTag, repositoryOf, run } from './lib/artifacts.mjs';
 
 export const sha256 = (data) => `sha256:${createHash('sha256').update(data).digest('hex')}`;
 const digestPattern = /^sha256:[a-f0-9]{64}$/;
+
+export function consumerConfig(item, version) {
+  // wash maps an OCI repository to a WIT registry and derives the tag from
+  // the import version; it does not accept a manifest digest as that mapping.
+  return { version: '2.0.0', wit: { sources: {
+    [item.package]: `ghcr.io/${repositoryOf(item)}:${version}`,
+  } } };
+}
 
 export function classify(status, manifest, expected) {
   if (status === 404) return 'push';
@@ -42,7 +50,7 @@ export async function probe(repository, tag, { anonymous = false, request = fetc
       if (existing.status === 404) return { status: 404 };
       throw new Error(`Cannot confirm package absence (GitHub HTTP ${existing.status})`);
     }
-    throw new Error(`GHCR token request failed (HTTP ${auth.status})`);
+    throw Object.assign(new Error(`GHCR token request failed (HTTP ${auth.status})`), { tokenStatus: auth.status });
   }
   const token = (await auth.json()).token;
   if (typeof token !== 'string' || !token) throw new Error('GHCR returned no registry token');
@@ -62,22 +70,26 @@ async function sameWit(local, remote) {
   return a.stdout === b.stdout;
 }
 
-async function pullAndCompare(id, reference, local, expectedLayer, anonymous) {
-  const temp = mkdtempSync(join(tmpdir(), 'couchbase-pull-'));
+async function pullAndCompare(item, version, reference, local, expectedLayer, anonymous) {
+  const temp = mkdtempSync(join(tmpdir(), 'artifact-pull-'));
   try {
     // A fresh Docker config proves the package is available without credentials.
     const env = anonymous ? { ...process.env, DOCKER_CONFIG: temp } : process.env;
     const pulled = join(temp, 'artifact.wasm');
     await run('wash', ['oci', 'pull', reference, pulled], { env, timeout: 120_000 });
     if (sha256(readFileSync(pulled)) !== expectedLayer) throw new Error('Pulled bytes do not match the manifest');
-    if (id === 'wit') {
+    if (item.kind === 'wit') {
       if (!await sameWit(local, pulled)) throw new Error('Published WIT differs; bump its package version');
       if (anonymous) {
         const consumer = join(temp, 'consumer');
         mkdirSync(join(consumer, 'wit'), { recursive: true });
         writeFileSync(join(consumer, 'wit', 'world.wit'),
-          `package example:consumer;\nworld consumer { import wasmcloud:couchbase/document-read@${versionOf('wit')}; }\n`);
-        // No local source override or custom registry mapping: exercise normal wash resolution.
+          `package example:consumer;\nworld consumer { ${item.smokeImports.map(name => `import ${item.package}/${name}@${version};`).join(' ')} }\n`);
+        if (!item.defaultRegistry) {
+          // Namespaces without a default resolver can consume the same public OCI package.
+          mkdirSync(join(consumer, '.wash'));
+          writeFileSync(join(consumer, '.wash', 'config.yaml'), JSON.stringify(consumerConfig(item, version)));
+        }
         await run('wash', ['wit', 'fetch'], { cwd: consumer, env, timeout: 120_000 });
         await run('wasm-tools', ['component', 'wit', join(consumer, 'wit')]);
       }
@@ -90,39 +102,46 @@ async function pullAndCompare(id, reference, local, expectedLayer, anonymous) {
 }
 
 async function main([command, id, ...extra]) {
-  if (!['check', 'publish', 'verify'].includes(command) || extra.length) throw new Error('Usage: publish-couchbase-release.mjs <check|publish|verify> <wit|http|sockets|tls>');
+  if (!['check', 'publish', 'verify'].includes(command) || extra.length) throw new Error('Usage: publish-artifact.mjs <check|publish|verify> <catalog-id>');
   const item = artifact(id);
+  const repository = repositoryOf(item);
   const local = resolve('dist', `${id}.wasm`);
-  const version = versionOf(id);
+  const version = await builtVersion(id);
   if (command === 'check') {
-    if (id !== 'wit') throw new Error('Contract preflight only accepts the WIT artifact');
-    const found = await probe(item.repository, version, { anonymous: true });
-    if (classify(found.status, found.manifest, sha256(readFileSync(local))) !== 'push') {
-      await pullAndCompare(id, `ghcr.io/${item.repository}@${found.digest}`, local, found.manifest.layers[0].digest, false);
+    if (item.kind !== 'wit') throw new Error('Contract preflight only accepts WIT artifacts');
+    let found;
+    try { found = await probe(repository, version, { anonymous: true }); }
+    catch (error) {
+      if (![401, 403, 404].includes(error.tokenStatus)) throw error;
+      console.log('Package is not visible anonymously; authenticated publication must check it before components publish');
+      return;
     }
-    console.log(`Contract preflight passed: wasmcloud:couchbase@${version}`);
+    if (classify(found.status, found.manifest, sha256(readFileSync(local))) !== 'push') {
+      await pullAndCompare(item, version, `ghcr.io/${repository}@${found.digest}`, local, found.manifest.layers[0].digest, false);
+    }
+    console.log(`Contract preflight passed: ${item.package}@${version}`);
     return;
   }
-  const tag = releaseTag(id, version, process.env.GITHUB_REF ?? '', process.env.GITHUB_SHA ?? '');
-  const image = `ghcr.io/${item.repository}`;
+  const tag = releaseTag(item, version, process.env.GITHUB_REF ?? '', process.env.GITHUB_SHA ?? '');
+  const image = `ghcr.io/${repository}`;
   const reference = `${image}:${tag}`;
   const expected = sha256(readFileSync(local));
-  const result = await probe(item.repository, tag, { anonymous: command === 'verify' });
+  const result = await probe(repository, tag, { anonymous: command === 'verify' });
   let action = classify(result.status, result.manifest, expected);
   if (command === 'verify') {
     if (action === 'push') throw new Error(`${reference} is not public`);
     if (!digestPattern.test(process.env.PUBLISHED_DIGEST ?? '') || result.digest !== process.env.PUBLISHED_DIGEST) {
       throw new Error('Published tag does not resolve to the expected OCI manifest digest');
     }
-    await pullAndCompare(id, `${image}@${result.digest}`, local, result.manifest.layers[0].digest, true);
+    await pullAndCompare(item, version, `${image}@${result.digest}`, local, result.manifest.layers[0].digest, true);
     console.log(`Verified anonymous pull: ${reference} (${result.digest})`);
     return;
   }
   let digest = result.digest;
   if (action === 'different') {
-    if (id !== 'wit') throw new Error(`${reference} already holds different bytes; bump its version`);
+    if (item.kind !== 'wit') throw new Error(`${reference} already holds different bytes; bump its version`);
     // Metadata may change between commits while the versioned contract stays identical.
-    await pullAndCompare(id, `${image}@${digest}`, local, result.manifest.layers[0].digest, false);
+    await pullAndCompare(item, version, `${image}@${digest}`, local, result.manifest.layers[0].digest, false);
     action = 'skip';
   }
   if (action === 'push') {
@@ -138,5 +157,5 @@ async function main([command, id, ...extra]) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try { await main(process.argv.slice(2)); }
-  catch (error) { console.error(error.message); process.exitCode = 1; }
+  catch (error) { console.error(error.message); if (error.stderr || error.stdout) console.error(error.stderr || error.stdout); process.exitCode = 1; }
 }
