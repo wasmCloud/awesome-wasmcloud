@@ -29,6 +29,14 @@ feature, such as `ghcr.io/wasmcloud/wash:2.12.0-all-features`. This plugin
 imports `wasmcloud:host@0.1.6` to read plugin-backed secrets, which older hosts
 do not provide.
 
+Prebuilt images are available as
+`ghcr.io/wasmcloud/components/couchbase-wasi-sockets-p3:0.1.0` and
+`ghcr.io/wasmcloud/components/couchbase-wasi-sockets-p3-tls:0.1.0`.
+Choose the TLS image for `couchbases://`; it requires the host support described
+in [TLS](#tls).
+Workloads import `wasmcloud:couchbase@0.3.0` and run `wash wit fetch` normally;
+the [published contract](../couchbase/README.md#build) needs no local source override.
+
 ## Why it exists
 
 | | this plugin | [`couchbase`](../couchbase/) |
@@ -138,7 +146,7 @@ owns the binding and the workload's manifest names none of it:
 
 ```yaml
 - id: couchbase
-  image: registry.example.com/couchbase-wasi-sockets-p3:0.1.0
+  image: ghcr.io/wasmcloud/components/couchbase-wasi-sockets-p3:0.1.0
   config:
     endpoint: couchbase://couchbase.example.com
     bucket: orders
