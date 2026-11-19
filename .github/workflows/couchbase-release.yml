@@ -24,7 +24,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: couchbase-release-${{ github.ref }}
+  group: couchbase-release-${{ github.event_name == 'pull_request' && github.ref || 'publication' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -88,6 +88,9 @@ jobs:
         env:
           ARTIFACT: ${{ matrix.artifact }}
         run: node .github/scripts/build-couchbase-release.mjs "$ARTIFACT"
+      - name: Check published contract before releasing components
+        if: matrix.artifact == 'wit'
+        run: node .github/scripts/publish-couchbase-release.mjs check wit
       - name: Check dependency locks
         run: git diff --exit-code -- '**/Cargo.lock' '**/wkg.lock'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

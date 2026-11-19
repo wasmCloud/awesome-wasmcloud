@@ -12,7 +12,7 @@ The authoritative contract remains in
 Its package declaration determines the WIT version, independently of the plugins.
 It publishes to `ghcr.io/wasmcloud/interfaces/wasmcloud/couchbase:<version>`,
 matching wash's default `wasmcloud` namespace registry.
-An existing version with different WIT fails publication; bump the WIT version
+An existing version with different WIT fails the build before any components publish; bump the WIT version
 and update its consumers before releasing a changed contract.
 Unchanged WIT is reused without replacing its original metadata or provenance.
 
@@ -34,9 +34,8 @@ All publish jobs wait for native tests and all four artifact builds to pass.
 Publishing is restricted to this repository's `main` and release tags;
 manual runs on feature branches build without publishing.
 
-GHCR creates new packages as private by default.
-After the first push, an organization package administrator must make each new
-package public in its package settings and retain this repository's Actions access.
+If GHCR creates a new package as private, an organization package administrator
+must make it public in its package settings and retain this repository's Actions access.
 If anonymous verification fails for that reason, make it public and rerun the
 failed publish job; matching artifacts are reused and attestation can resume.
 

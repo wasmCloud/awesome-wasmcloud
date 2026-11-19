@@ -90,10 +90,19 @@ async function pullAndCompare(id, reference, local, expectedLayer, anonymous) {
 }
 
 async function main([command, id, ...extra]) {
-  if (!['publish', 'verify'].includes(command) || extra.length) throw new Error('Usage: publish-couchbase-release.mjs <publish|verify> <wit|http|sockets|tls>');
+  if (!['check', 'publish', 'verify'].includes(command) || extra.length) throw new Error('Usage: publish-couchbase-release.mjs <check|publish|verify> <wit|http|sockets|tls>');
   const item = artifact(id);
   const local = resolve('dist', `${id}.wasm`);
   const version = versionOf(id);
+  if (command === 'check') {
+    if (id !== 'wit') throw new Error('Contract preflight only accepts the WIT artifact');
+    const found = await probe(item.repository, version, { anonymous: true });
+    if (classify(found.status, found.manifest, sha256(readFileSync(local))) !== 'push') {
+      await pullAndCompare(id, `ghcr.io/${item.repository}@${found.digest}`, local, found.manifest.layers[0].digest, false);
+    }
+    console.log(`Contract preflight passed: wasmcloud:couchbase@${version}`);
+    return;
+  }
   const tag = releaseTag(id, version, process.env.GITHUB_REF ?? '', process.env.GITHUB_SHA ?? '');
   const image = `ghcr.io/${item.repository}`;
   const reference = `${image}:${tag}`;
