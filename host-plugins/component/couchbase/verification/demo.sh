@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Runs one unmodified workload against BOTH implementations of
-# `wasmcloud:couchbase@0.2.0` and shows that it cannot tell them apart.
+# `wasmcloud:couchbase@0.3.0` and shows that it cannot tell them apart.
 #
 #   - the `couchbase` plugin, over the Data API's HTTPS surface -- served here
 #     by Couchbase's Cloud Native Gateway, the same gateway that fronts Capella
@@ -58,7 +58,7 @@ cleanup() {
 trap cleanup EXIT
 
 # The build half of the workload's config, identical for every run.
-# `wasmcloud:couchbase@0.2.0` is not published, so it resolves from the repo.
+# `wasmcloud:couchbase@0.3.0` is not published, so it resolves from the repo.
 write_base_config() {
   mkdir -p "$SCENARIO/.wash"
   printf '%s\n' \
@@ -159,8 +159,13 @@ run_scenario() {
     printf '%s\n' '  host_interfaces:' \
                   '    - namespace: wasmcloud' \
                   '      package: couchbase' \
-                  '      interfaces: [types, sqlpp-types, document, sqlpp]' \
-                  '      version: "0.2.0"' \
+                  '      interfaces:' \
+                  '        - types' \
+                  '        - sqlpp-types' \
+                  '        - document-read' \
+                  '        - document-write' \
+                  '        - sqlpp' \
+                  '      version: "0.3.0"' \
                   '      config:'
     printf '        endpoint: %s\n' "$endpoint"
     printf '%s\n' '        bucket: testbucket' \

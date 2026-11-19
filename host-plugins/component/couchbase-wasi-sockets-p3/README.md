@@ -1,6 +1,6 @@
 # Couchbase KV Component Host Plugin (wasi:sockets)
 
-The recommended implementation of `wasmcloud:couchbase@0.2.0`, speaking Couchbase's KV
+The recommended implementation of `wasmcloud:couchbase@0.3.0`, speaking Couchbase's KV
 binary protocol directly over `wasi:sockets@0.3.0`, with optional verified TLS
 through `wasi:tls@0.3.0-draft`. **No SDK and no gateway** — the protocol is
 implemented in `proto.rs` and `conn.rs`, with the bindings glue in `plugin.rs`.
@@ -12,14 +12,17 @@ The interface is not copied. [`.wash/config.yaml`](.wash/config.yaml) resolves
 `wasmcloud:couchbase` from `../couchbase/interface`, so this plugin and the
 Data API plugin cannot drift.
 
-SQL++ HTTP replies are read incrementally with backpressure and a 32 MiB body limit.
-The reader also checks transport completion before returning a query result.
+SQL++ returns backpressured JSON rows and a typed completion handle.
+Its decoder retains one row, with limits of 32 MiB per row, 64 KiB of metadata,
+256 MiB per response and one million rows.
+Drain the stream, then check completion; drop the completion handle to cancel.
+See the [interface and migration guide](../couchbase/README.md#interfaces-and-migration)
+for separate read/write grants and the 0.3.0 contract.
 KV replies retain their separate 32 MiB framing limit.
 
 **Status: working.** 40/40 on the
 [shared verification scenario](../couchbase/verification/), the same score as
-the Data API plugin, against a real cluster. Also run as a host plugin on a wasmCloud
-2.12.0 cluster in Kubernetes.
+the Data API plugin, against a real cluster, including the streamed 0.3.0 contract.
 
 **Requires wasmCloud 2.12.0 or newer**, built with the `host-component-plugins`
 feature, such as `ghcr.io/wasmcloud/wash:2.12.0-all-features`. This plugin

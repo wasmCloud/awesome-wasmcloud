@@ -13,6 +13,14 @@ pub mod proto;
 #[path = "../../couchbase/src/query.rs"]
 pub mod query;
 
+#[path = "../../couchbase/src/query_rows.rs"]
+#[cfg(any(target_family = "wasm", test))]
+pub(crate) mod query_rows;
+
+#[cfg(target_family = "wasm")]
+#[path = "../../couchbase/src/query_stream.rs"]
+mod query_stream;
+
 #[path = "../../couchbase/src/transport.rs"]
 pub mod transport;
 

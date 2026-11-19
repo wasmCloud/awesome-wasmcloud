@@ -89,7 +89,7 @@ cargo build --bin wash --features host-component-plugins
 ```
 
 **3. The scenario.** Build the plugin (`wash build` in the project root), then give `scenario/.wash/config.yaml` the WIT source, the CA, the plugin
-and its interface config. `wasmcloud:couchbase@0.2.0` is not published, so it
+and its interface config. `wasmcloud:couchbase@0.3.0` is not published, so it
 resolves from `../../interface`; run `wash wit fetch` once in `scenario/`,
 because `wash dev` deliberately does not fetch.
 
@@ -113,8 +113,13 @@ dev:
   host_interfaces:
     - namespace: wasmcloud
       package: couchbase
-      interfaces: [types, sqlpp-types, document, sqlpp]
-      version: "0.2.0"
+      interfaces:
+        - types
+        - sqlpp-types
+        - document-read
+        - document-write
+        - sqlpp
+      version: "0.3.0"
       config:
         endpoint: https://<LAN>:18008
         bucket: testbucket

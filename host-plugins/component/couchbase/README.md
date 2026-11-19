@@ -9,11 +9,11 @@ sandbox and reaches Couchbase over the [Capella Data API](https://docs.couchbase
 HTTPS surface through `wasi:http/client@0.3.0` rather than over the binary KV
 protocol.
 
-HTTP bodies are read incrementally with backpressure and a 32 MiB limit,
-including chunked replies.
-The WIT interface returns complete documents and query results,
-so the bounded body is retained until the transport completion check succeeds.
-Oversized replies fail explicitly before JSON decoding or returning partial data.
+Document HTTP bodies use incremental reads with a 32 MiB limit, including chunked replies.
+SQL++ rows stream through the WIT interface as complete JSON values, with
+backpressure and an explicit final-status check.
+Queries permit up to 32 MiB per row, 64 KiB of metadata, 256 MiB per response
+and one million rows, within one overall deadline.
 
 > **Status: experimental, but exercised end to end.** It has been run in a real
 > wasmCloud host against live Capella, and — reproducibly, with no cloud account
@@ -22,46 +22,33 @@ Oversized replies fail explicitly before JSON decoding or returning partial data
 > servable operation, including CAS conflicts, TTLs, binary documents and
 > parameterized SQL++. See [What is and is not verified](#what-is-and-is-not-verified).
 
-## Relationship to `wasmcloud:couchbase@0.1.0-draft`
+## Interfaces and migration
 
-There is already a published `wasmcloud:couchbase` — the WIT in
-[`Couchbase-Ecosystem/wasmcloud-provider-couchbase`](https://github.com/Couchbase-Ecosystem/wasmcloud-provider-couchbase),
-at `@0.1.0-draft`. **This package deliberately mirrors it**, so that code
-written against the provider ports across with as little friction as possible.
+The capability contract is `wasmcloud:couchbase@0.3.0`.
+All operations are asynchronous and can be implemented by another component.
 
-It could not simply reuse it. That package is entirely synchronous — 27
-functions, none `async` — and a component host plugin serves its capability
-across a store boundary where the cross-store shim registers and type-matches
-**only asynchronous** imports. A synchronous interface cannot be served by a
-plugin at all. So this is the same API at `@0.2.0` with `async func`
-throughout, the same move wasmCloud made revising `wasmcloud:secrets` from
-`1.0.0` to `2.0.0`.
+- `document-read` grants `get`, `get-any-replicas` and `get-all-replicas`.
+  It cannot change documents, expiry or locks.
+- `document-write` grants insert, replace, upsert, remove, touch,
+  get-and-touch, get-and-lock and unlock.
+- `sqlpp` grants arbitrary SQL++ statements and streamed results.
+  It may mutate data; a component that should only read documents should
+  import `document-read` without `sqlpp` or `document-write`.
+  Database RBAC still limits the bound credential.
+- Shared document option and result records live in `types`.
+  SQL++ parameter values and typed errors live in `sqlpp-types`.
 
-Porting is mostly adding `.await`. Names, records, option fields and signatures
-are otherwise unchanged.
-
-Five intentional differences, each marked with a `DIFFERS FROM 0.1.0-draft`
-note at the point it occurs in [`interface/couchbase.wit`](interface/couchbase.wit):
-
-1. **`get-any-repliacs` is spelled `get-any-replicas`.** 0.1.0-draft has the
-   letters transposed. This is the only rename in the package, so porting means
-   fixing one call site that the compiler points straight at. `0.2.0` is a
-   breaking version regardless, and carrying a typo across it would have meant
-   carrying it indefinitely.
-2. **`document-error` and `sqlpp-query-error` gain cases.** 0.1.0-draft's
-   `document-error` can only describe what a *document* did wrong — it has no
-   way to say "the credentials were refused", "the cluster never answered", or
-   "this workload has no binding". Original cases are retained, but consumers
-   must handle the added cases when migrating; variants have a fixed case set.
-3. **`sqlpp-value` gains a `json` case.** 0.1.0-draft declares it with `null` as
-   its only case, which cannot carry a parameter into a query or a row out of
-   one.
-4. **A document's value is `list<u8>` plus `document-flags`,** where
-   0.1.0-draft has `variant document { raw(json-string), %resource(document-value) }`.
-   See [below](#a-documents-value-bytes-and-flags).
-5. **`get-any-repliacs` aside, the operation set is unchanged.** Locking and
-   replica reads are kept. See
-   [below](#operations-this-implementation-cannot-serve).
+Migrating from this example's `0.2.0` contract requires changing WIT imports
+and manifest versions to `0.3.0`, selecting the separate read/write interfaces,
+and importing document option/result records from `types`.
+Interfaces using the same binding label must share the same effective config.
+Use one binding entry listing the required interfaces, or distinct named
+imports when reads, writes or queries need different credentials or keyspaces.
+Conflicting configs for one label are rejected during binding.
+SQL++ returns `query-result`: consume its row stream, then call
+`query-completion.finish` to check final service and transport status.
+The earlier synchronous `0.1.0-draft` provider interface additionally requires
+async calls and adapting document values to owned bytes plus flags.
 
 ## Requirements
 
@@ -155,15 +142,27 @@ Because a capability call into a plugin has **no host-imposed timeout**, this
 
 ## Using it from a workload
 
-Copy [`interface/couchbase.wit`](interface/couchbase.wit) into your component's
-`wit/deps/wasmcloud-couchbase/`, then import what you need:
+Resolve [`interface/couchbase.wit`](interface/couchbase.wit) through a local
+`wit.sources` entry in your workload's wash configuration, then import only the
+capabilities it needs:
+
+For a workload alongside this checkout, add to `.wash/config.yaml`:
+
+```yaml
+wit:
+  sources:
+    "wasmcloud:couchbase": ../awesome-wasmcloud/host-plugins/component/couchbase/interface
+```
+
+Then run `wash wit fetch` and declare the required imports:
 
 ```wit
 world my-app {
-    import wasmcloud:couchbase/types@0.2.0;
-    import wasmcloud:couchbase/document@0.2.0;
-    import wasmcloud:couchbase/sqlpp@0.2.0;
-    import wasmcloud:couchbase/sqlpp-types@0.2.0;
+    import wasmcloud:couchbase/types@0.3.0;
+    import wasmcloud:couchbase/document-read@0.3.0;
+    import wasmcloud:couchbase/document-write@0.3.0;
+    import wasmcloud:couchbase/sqlpp@0.3.0;
+    import wasmcloud:couchbase/sqlpp-types@0.3.0;
     export wasi:http/handler@0.3.0;
 }
 ```
@@ -172,7 +171,8 @@ Records generated from WIT carry no `Default`, and 0.1.0-draft's option records
 are wide, so a helper per operation keeps call sites readable:
 
 ```rust
-use bindings::wasmcloud::couchbase::document::{self, DocumentInsertOptions, DocumentReplaceOptions};
+use bindings::wasmcloud::couchbase::{document_read, document_write};
+use bindings::wasmcloud::couchbase::types::{DocumentInsertOptions, DocumentReplaceOptions};
 use bindings::wasmcloud::couchbase::types::{Document, DurabilityLevel};
 
 fn insert_opts(expires_in_ns: u64) -> DocumentInsertOptions {
@@ -189,21 +189,21 @@ fn insert_opts(expires_in_ns: u64) -> DocumentInsertOptions {
 }
 
 // A document's value is bytes. Expiry is in nanoseconds, as in 0.1.0-draft.
-let written = document::insert(
+let written = document_write::insert(
     "user:42".to_string(),
     br#"{"name":"Ada"}"#.to_vec(),
     Some(insert_opts(600 * 1_000_000_000)),
 ).await?;
 
 // Conditional update: fails with `cas-mismatch` if anything wrote in between.
-document::replace(
+document_write::replace(
     "user:42".to_string(),
     br#"{"name":"Ada Lovelace"}"#.to_vec(),
     Some(DocumentReplaceOptions { cas: written.cas, ..replace_defaults() }),
 ).await?;
 
 // A missing document is `not-found`, matching 0.1.0-draft.
-match document::get("user:42".to_string(), None).await {
+match document_read::get("user:42".to_string(), None).await {
     Ok(got) => { /* got.document: Vec<u8>, got.flags, got.cas */ }
     Err(DocumentError::NotFound) => { /* absent */ }
     Err(e) => return Err(e),
@@ -211,7 +211,7 @@ match document::get("user:42".to_string(), None).await {
 
 // Anything that is not JSON needs its flags set, or a reader will
 // transcode it wrongly.
-document::upsert(
+document_write::upsert(
     "thumbnail:42".to_string(),
     png_bytes,
     Some(DocumentUpsertOptions { flags: Some(0x0300_0000), ..upsert_defaults() }),
@@ -222,17 +222,27 @@ Bind user input as query parameters rather than interpolating it into the
 statement, so the cluster treats it as a value and never as SQL++ syntax:
 
 ```rust
-use bindings::wasmcloud::couchbase::sqlpp;
+use bindings::wasmcloud::couchbase::sqlpp::{self, QueryCompletion};
 use bindings::wasmcloud::couchbase::sqlpp_types::SqlppValue;
 
 let result = sqlpp::query(
     "SELECT RAW d.name FROM _default AS d WHERE d.city = $1 LIMIT 10".to_string(),
     vec![SqlppValue::Json(r#""Berlin""#.to_string())],
-    Some(query_opts()),
+    None,
 ).await?;
 
-// The result is the service's `results` array as JSON text.
-if let SqlppValue::Json(rows) = result { /* decode `rows` */ }
+let mut rows = result.rows;
+let mut count = 0;
+loop {
+    let (_, chunk) = rows.read(Vec::with_capacity(1)).await;
+    if chunk.is_empty() { break; }
+    for _row in chunk {
+        // Process this JSON row without retaining the whole result set.
+        count += 1;
+    }
+}
+QueryCompletion::finish(result.completion).await?;
+// Only now is the query successful; earlier rows were provisional.
 ```
 
 An unqualified keyspace resolves against the binding's own bucket and scope,
@@ -246,13 +256,13 @@ A complete, compiling example of every operation is
 
 | WIT | Request |
 |---|---|
-| `document.get` | `GET …/documents/{id}`, `?project=` per field |
-| `document.insert` | `POST …/documents/{id}` |
-| `document.upsert` | `PUT …/documents/{id}` |
-| `document.replace` | `PUT …/documents/{id}` with `If-Match` — the caller's CAS, or `*` |
-| `document.remove` | `DELETE …/documents/{id}` |
-| `document.touch` | `POST …/documents/{id}/touch` |
-| `document.get-and-touch` | `POST …/documents/{id}/touch` with `returnContent` |
+| `document-read.get` | `GET …/documents/{id}`, `?project=` per field |
+| `document-write.insert` | `POST …/documents/{id}` |
+| `document-write.upsert` | `PUT …/documents/{id}` |
+| `document-write.replace` | `PUT …/documents/{id}` with `If-Match` — the caller's CAS, or `*` |
+| `document-write.remove` | `DELETE …/documents/{id}` |
+| `document-write.touch` | `POST …/documents/{id}/touch` |
+| `document-write.get-and-touch` | `POST …/documents/{id}/touch` with `returnContent` |
 | `sqlpp.query` | `POST /_p/query/query/service` |
 
 `get-and-lock` and `unlock` use `POST …/documents/{id}/lock` and `/unlock`
@@ -310,43 +320,41 @@ that is not valid UTF-8 would have to fail. The
 `[0x00, 0xFF, 0xFE, 0x01, 0x80, 0x7F]` and reads it back byte-for-byte with its
 flags intact.
 
-**Why not a resource.** 0.1.0-draft's `document-value` offered an "efficient
-implementer-specific" JSON representation. Two problems. It wrapped a string in
-practice, so it bought nothing. And a resource the *caller* constructs cannot
-cross a component host plugin's store boundary at all:
+Owned document bytes preserve binary values and avoid a document-specific
+resource representation.
+The query completion handle is created by the plugin and proxied by the host;
+it carries no caller-constructed resource into the plugin.
 
+## Streaming query results
+
+The plugin decodes the Query Service envelope incrementally and emits one JSON
+row per `stream<string>` item.
+It does not buffer the result array.
+Only one row and bounded metadata are retained by the decoder;
+stream writes supply backpressure through the component boundary.
+
+Drain rows before awaiting `QueryCompletion::finish(result.completion)`.
+That consuming call returns a typed error for late query failures, malformed
+or oversized results, transport truncation, and deadlines.
+EOF alone is insufficient: a server can emit valid rows before reporting an
+error at the end of its envelope.
+Dropping the completion handle cancels outstanding reads and writes.
+The deadline includes the initial request, row delivery and downstream backpressure.
+
+A read-only workload needs only:
+
+```wit
+world reader {
+    import wasmcloud:couchbase/document-read@0.3.0;
+    export wasi:http/handler@0.3.0;
+}
 ```
-component imports instance `wasmcloud:couchbase/types`, but a matching
-implementation was not found in the linker
-  instance export `document-value` has the wrong type
-  resource implementation is missing
-```
 
-The rule, visible in `wasmcloud:keyvalue@0.2.0`: a plugin capability may
-**return** resources — keyvalue's `bucket` comes out of `store.open` and is
-passed back as `borrow<bucket>` — but it cannot **accept** guest-constructed
-ones. `document-value` had a constructor and a static, so its handles flow
-inward, which is what fails. (wasi-http's guest-constructible `fields` and
-`request` are not a counterexample: wasi-http is host-native, not dispatched
-across a plugin store.) Verified both with and without other functions in the
-same instance, so it is the resource, not the shape of the instance around it.
-
-`list<u8>` is both the honest model and the portable one.
-
-## Design notes
-
-- **Handle-free.** Every operation takes and returns plain values. Handles
-  crossing a store boundary are relocated by the runtime rather than shared, so
-  a handle-free interface stays on the fast path.
-- **Buffered, not streamed.** The Query Service returns its whole result set as
-  one JSON document, so a streaming signature would be streaming a payload that
-  had already arrived in full. Bound result sets with `LIMIT`.
-- **Cancellation is checked before a request is issued**, via
-  `wasmcloud:host/cancel`. A teardown arriving while calls are queued returns
-  those calls immediately; a request already in flight still runs to its own
-  transport timeout.
-- **No `wasi:cli/run`.** There is no background work between calls, and a pure
-  capability plugin is allowed to omit it.
+Use the same restricted interface list in its host binding.
+The [read-only verification caller](../../../tests/probe/wit/world.wit)
+provides a runnable example.
+SQL++ and document-write are separate grants; omitting those imports prevents
+these operations from being linked into the caller.
 
 ## What is and is not verified
 
@@ -415,7 +423,7 @@ a clock read, and it would be stale on arrival.
   lifecycle hooks as `async func` — the plugin contract's hard requirement.
 - Its imports are `wasi:http/client@0.3.0`, `wasi:clocks/system-clock`,
   `wasmcloud:host/identity` and `wasmcloud:host/cancel`; its exports are the
-  four `wasmcloud:couchbase` interfaces plus
+  five `wasmcloud:couchbase` interfaces plus
   `wasmcloud:host/workload-lifecycle@0.1.6`.
 - 40 unit tests cover config validation, endpoint parsing, error classification,
   CAS and mutation-token parsing, URL segment encoding, the ISO 8601 conversion,

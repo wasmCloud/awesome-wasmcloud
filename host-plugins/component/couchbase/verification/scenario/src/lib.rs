@@ -11,12 +11,14 @@ mod bindings {
 use bindings::exports::wasi::http::handler::Guest as Handler;
 use bindings::wasi::http::types::{ErrorCode, Fields, Request, Response};
 
-use bindings::wasmcloud::couchbase::document::{
-    self, DocumentGetAndTouchOptions, DocumentGetOptions, DocumentInsertOptions,
-    DocumentRemoveOptions, DocumentReplaceOptions, DocumentTouchOptions, DocumentUnlockOptions,
-    DocumentUpsertOptions,
+use bindings::wasmcloud::couchbase::sqlpp::SqlppQueryOptions;
+use bindings::wasmcloud::couchbase::types::{
+    DocumentGetAndTouchOptions, DocumentGetOptions, DocumentInsertOptions, DocumentRemoveOptions,
+    DocumentReplaceOptions, DocumentTouchOptions, DocumentUnlockOptions, DocumentUpsertOptions,
 };
-use bindings::wasmcloud::couchbase::sqlpp::{self, SqlppQueryOptions};
+use bindings::wasmcloud::couchbase::{document_read as read, document_write as write};
+#[path = "../../../../../../tests/query-consumer.rs"]
+mod query_consumer;
 use bindings::wasmcloud::couchbase::sqlpp_types::{SqlppQueryError, SqlppValue};
 use bindings::wasmcloud::couchbase::types::{
     DocumentError, DurabilityLevel, MutationState, MutationToken, QueryScanConsistency,
@@ -195,7 +197,7 @@ fn doc_text(d: &[u8]) -> String {
 }
 
 async fn expiry_of(id: &str) -> Result<String, String> {
-    let got = document::get(
+    let got = read::get(
         id.into(),
         Some(DocumentGetOptions {
             with_expiry: true,
@@ -213,7 +215,7 @@ async fn expiry_of(id: &str) -> Result<String, String> {
 async fn long_ttl_regression() -> Result<(), String> {
     let id = "scenario:long-ttl";
     let ttl = 31 * 24 * 60 * 60 * SECOND_NS;
-    document::upsert(
+    write::upsert(
         id.into(),
         br#"{"long_ttl":true}"#.to_vec(),
         Some(upsert_opts(ttl)),
@@ -221,7 +223,7 @@ async fn long_ttl_regression() -> Result<(), String> {
     .await
     .map_err(|e| describe(&e))?;
     expiry_of(id).await?;
-    document::touch(
+    write::touch(
         id.into(),
         Some(DocumentTouchOptions {
             expires_in: ttl,
@@ -233,7 +235,7 @@ async fn long_ttl_regression() -> Result<(), String> {
     .await
     .map_err(|e| describe(&e))?;
     expiry_of(id).await?;
-    document::get_and_touch(
+    write::get_and_touch(
         id.into(),
         Some(DocumentGetAndTouchOptions {
             expires_in: ttl,
@@ -250,7 +252,7 @@ async fn long_ttl_regression() -> Result<(), String> {
 
 async fn query_expiry_regression() -> Result<(), String> {
     let id = "scenario:query-expiry";
-    document::upsert(
+    write::upsert(
         id.into(),
         br#"{"marker":0}"#.to_vec(),
         Some(upsert_opts(3600 * SECOND_NS)),
@@ -258,7 +260,7 @@ async fn query_expiry_regression() -> Result<(), String> {
     .await
     .map_err(|e| describe(&e))?;
     let before = expiry_of(id).await?;
-    sqlpp::query(
+    query_consumer::query(
         "UPDATE _default USE KEYS $1 SET marker = 1".into(),
         vec![SqlppValue::Json(format!("\"{id}\""))],
         Some(SqlppQueryOptions {
@@ -290,16 +292,16 @@ async fn scenario() -> Vec<String> {
     let k = "scenario:doc";
 
     // Start from a known-empty key so the run is repeatable.
-    let _ = document::remove(k.to_string(), None).await;
+    let _ = write::remove(k.to_string(), None).await;
 
     r.expect_err(
         "01 get-missing",
         "not-found",
-        document::get(k.to_string(), None).await,
+        read::get(k.to_string(), None).await,
         describe,
     );
 
-    let inserted = document::insert(
+    let inserted = write::insert(
         k.to_string(),
         r#"{"name":"Ada","n":1}"#.as_bytes().to_vec(),
         Some(insert_opts(0)),
@@ -315,7 +317,7 @@ async fn scenario() -> Vec<String> {
 
     r.ok(
         "03 get",
-        document::get(k.to_string(), None).await,
+        read::get(k.to_string(), None).await,
         |g| format!("cas={} doc={}", g.cas, doc_text(&g.document)),
         describe,
     );
@@ -323,18 +325,28 @@ async fn scenario() -> Vec<String> {
     r.expect_err(
         "04 insert-duplicate",
         "already-exists",
-        document::insert(k.to_string(), "{}".as_bytes().to_vec(), Some(insert_opts(0))).await,
+        write::insert(
+            k.to_string(),
+            "{}".as_bytes().to_vec(),
+            Some(insert_opts(0)),
+        )
+        .await,
         describe,
     );
 
-    let upserted = document::upsert(
+    let upserted = write::upsert(
         k.to_string(),
         r#"{"name":"Ada Lovelace","n":2}"#.as_bytes().to_vec(),
         Some(upsert_opts(0)),
     )
     .await;
     let cas2 = upserted.as_ref().map(|m| m.cas).unwrap_or(0);
-    r.ok("05 upsert", upserted, |m| format!("cas={}", m.cas), describe);
+    r.ok(
+        "05 upsert",
+        upserted,
+        |m| format!("cas={}", m.cas),
+        describe,
+    );
     r.push(
         "06 cas-changed",
         format!("OK cas1={cas1} cas2={cas2} differ={}", cas1 != cas2),
@@ -343,7 +355,7 @@ async fn scenario() -> Vec<String> {
     r.expect_err(
         "07 replace-stale-cas",
         "cas-mismatch",
-        document::replace(
+        write::replace(
             k.to_string(),
             r#"{"stale":true}"#.as_bytes().to_vec(),
             Some(replace_opts(cas1)),
@@ -354,7 +366,7 @@ async fn scenario() -> Vec<String> {
 
     r.ok(
         "08 replace-current-cas",
-        document::replace(
+        write::replace(
             k.to_string(),
             r#"{"name":"Ada","n":3}"#.as_bytes().to_vec(),
             Some(replace_opts(cas2)),
@@ -368,7 +380,7 @@ async fn scenario() -> Vec<String> {
     r.expect_err(
         "09 replace-absent",
         "not-found",
-        document::replace(
+        write::replace(
             "scenario:absent".to_string(),
             "{}".as_bytes().to_vec(),
             Some(replace_opts(0)),
@@ -379,7 +391,7 @@ async fn scenario() -> Vec<String> {
 
     r.ok(
         "10 touch",
-        document::touch(
+        write::touch(
             k.to_string(),
             Some(DocumentTouchOptions {
                 expires_in: 3600 * SECOND_NS,
@@ -396,7 +408,7 @@ async fn scenario() -> Vec<String> {
     r.expect_err(
         "11 touch-zero",
         "invalid-argument",
-        document::touch(
+        write::touch(
             k.to_string(),
             Some(DocumentTouchOptions {
                 expires_in: 0,
@@ -411,14 +423,18 @@ async fn scenario() -> Vec<String> {
 
     r.ok(
         "12 get-projected",
-        document::get(k.to_string(), Some(get_opts(Some(vec!["name".to_string()])))).await,
+        read::get(
+            k.to_string(),
+            Some(get_opts(Some(vec!["name".to_string()]))),
+        )
+        .await,
         |g| doc_text(&g.document),
         describe,
     );
 
     r.ok(
         "13 get-and-touch",
-        document::get_and_touch(
+        write::get_and_touch(
             k.to_string(),
             Some(DocumentGetAndTouchOptions {
                 expires_in: 1800 * SECOND_NS,
@@ -434,7 +450,7 @@ async fn scenario() -> Vec<String> {
 
     r.ok(
         "14 upsert-with-expiry",
-        document::upsert(
+        write::upsert(
             "scenario:ttl".to_string(),
             r#"{"temp":true}"#.as_bytes().to_vec(),
             Some(upsert_opts(600 * SECOND_NS)),
@@ -449,13 +465,16 @@ async fn scenario() -> Vec<String> {
     // The transport decides whether these exist, so the assertion is on
     // coherence rather than on one fixed answer: either the operation is
     // refused as `unsupported`, or it works *and* the lock it took is real.
-    match document::get_and_lock(k.to_string(), None).await {
+    match write::get_and_lock(k.to_string(), None).await {
         Err(DocumentError::Unsupported(_)) => {
-            r.push("15 get-and-lock", "OK unsupported on this transport".to_string());
+            r.push(
+                "15 get-and-lock",
+                "OK unsupported on this transport".to_string(),
+            );
             r.expect_err(
                 "16 unlock",
                 "unsupported",
-                document::unlock(k.to_string(), None).await,
+                write::unlock(k.to_string(), None).await,
                 describe,
             );
         }
@@ -470,7 +489,7 @@ async fn scenario() -> Vec<String> {
             // temporary "locked" failure until the lock lapses, and then
             // succeeds, which looks like no lock was ever taken.
             let unlock_with = |cas| {
-                document::unlock(
+                write::unlock(
                     k.to_string(),
                     Some(DocumentUnlockOptions {
                         cas,
@@ -484,8 +503,9 @@ async fn scenario() -> Vec<String> {
             r.push(
                 "16 unlock",
                 match wrong {
-                    Ok(()) => "UNEXPECTED-OK unlock accepted a CAS that was not the lock's"
-                        .to_string(),
+                    Ok(()) => {
+                        "UNEXPECTED-OK unlock accepted a CAS that was not the lock's".to_string()
+                    }
                     Err(_) => match unlock_with(lock_cas).await {
                         Ok(()) => "OK lock held, refused a wrong cas, then released".to_string(),
                         Err(e) => format!(
@@ -496,13 +516,16 @@ async fn scenario() -> Vec<String> {
                 },
             );
         }
-        Err(e) => r.push("15 get-and-lock", format!("UNEXPECTED-ERR {}", describe(&e))),
+        Err(e) => r.push(
+            "15 get-and-lock",
+            format!("UNEXPECTED-ERR {}", describe(&e)),
+        ),
     }
 
     // SQL++ with a bound positional parameter.
     r.ok(
         "17 sqlpp-parameterized",
-        sqlpp::query(
+        query_consumer::query(
             "SELECT RAW d.name FROM _default AS d USE KEYS $1".to_string(),
             vec![SqlppValue::Json(format!("\"{k}\""))],
             Some(query_opts(true)),
@@ -517,7 +540,7 @@ async fn scenario() -> Vec<String> {
 
     r.ok(
         "18 sqlpp-null-param",
-        sqlpp::query(
+        query_consumer::query(
             "SELECT RAW $1 IS NULL".to_string(),
             vec![SqlppValue::Null],
             Some(query_opts(true)),
@@ -533,14 +556,14 @@ async fn scenario() -> Vec<String> {
     r.expect_err(
         "19 sqlpp-syntax-error",
         "invalid-argument",
-        sqlpp::query("SLECT bogus".to_string(), vec![], None).await,
+        query_consumer::query("SLECT bogus".to_string(), vec![], None).await,
         describe_query,
     );
 
     r.expect_err(
         "20 sqlpp-bad-param",
         "invalid-argument",
-        sqlpp::query(
+        query_consumer::query(
             "SELECT RAW $1".to_string(),
             vec![SqlppValue::Json("not json".to_string())],
             None,
@@ -551,20 +574,20 @@ async fn scenario() -> Vec<String> {
 
     r.ok(
         "21 remove",
-        document::remove(k.to_string(), Some(remove_opts(0))).await,
+        write::remove(k.to_string(), Some(remove_opts(0))).await,
         |m| format!("cas={}", m.cas),
         describe,
     );
     r.expect_err(
         "22 get-after-remove",
         "not-found",
-        document::get(k.to_string(), None).await,
+        read::get(k.to_string(), None).await,
         describe,
     );
     r.expect_err(
         "23 remove-absent",
         "not-found",
-        document::remove("scenario:absent".to_string(), None).await,
+        write::remove("scenario:absent".to_string(), None).await,
         describe,
     );
 
@@ -573,8 +596,8 @@ async fn scenario() -> Vec<String> {
     // transport does honour it, the TTL has to still be there afterwards —
     // "returned ok" alone would pass on an implementation that dropped it.
     let pk = "scenario:preserve";
-    let _ = document::remove(pk.to_string(), None).await;
-    let seeded = document::upsert(
+    let _ = write::remove(pk.to_string(), None).await;
+    let seeded = write::upsert(
         pk.to_string(),
         r#"{"a":1}"#.as_bytes().to_vec(),
         Some(upsert_opts(3600 * SECOND_NS)),
@@ -583,8 +606,11 @@ async fn scenario() -> Vec<String> {
     r.push(
         "24 preserve-expiry",
         match seeded {
-            Err(e) => format!("UNEXPECTED-ERR seeding a document with a TTL failed: {}", describe(&e)),
-            Ok(_) => match document::upsert(
+            Err(e) => format!(
+                "UNEXPECTED-ERR seeding a document with a TTL failed: {}",
+                describe(&e)
+            ),
+            Ok(_) => match write::upsert(
                 pk.to_string(),
                 r#"{"a":2}"#.as_bytes().to_vec(),
                 Some(DocumentUpsertOptions {
@@ -599,7 +625,7 @@ async fn scenario() -> Vec<String> {
                 }
                 Err(e) => format!("UNEXPECTED-ERR {}", describe(&e)),
                 Ok(_) => {
-                    let after = document::get(
+                    let after = read::get(
                         pk.to_string(),
                         Some(DocumentGetOptions {
                             with_expiry: true,
@@ -623,7 +649,7 @@ async fn scenario() -> Vec<String> {
     r.expect_err(
         "25 persist-to-rejected",
         "unsupported",
-        document::upsert(
+        write::upsert(
             "scenario:persist".to_string(),
             r#"{"a":1}"#.as_bytes().to_vec(),
             Some(DocumentUpsertOptions {
@@ -639,7 +665,7 @@ async fn scenario() -> Vec<String> {
     r.expect_err(
         "26 consistent-with-zeroed-rejected",
         "invalid-argument",
-        sqlpp::query(
+        query_consumer::query(
             "SELECT RAW 1".to_string(),
             vec![],
             Some(SqlppQueryOptions {
@@ -662,7 +688,7 @@ async fn scenario() -> Vec<String> {
     // enforcing it would leave the caller believing in a bound that is not there.
     r.push(
         "27 per-call-timeout",
-        match document::get(
+        match read::get(
             "scenario:ttl".to_string(),
             Some(DocumentGetOptions {
                 timeout_ns: Some(20 * 1_000_000_000),
@@ -688,7 +714,7 @@ async fn scenario() -> Vec<String> {
     r.expect_err(
         "28 consistent-with-wrong-bucket-rejected",
         "invalid-argument",
-        sqlpp::query(
+        query_consumer::query(
             "SELECT RAW 1".to_string(),
             vec![],
             Some(SqlppQueryOptions {
@@ -709,7 +735,7 @@ async fn scenario() -> Vec<String> {
 
     // The mutation token round-trip: write, take the token the cluster minted,
     // and ask a query to be consistent with exactly that write.
-    let tokened = document::upsert(
+    let tokened = write::upsert(
         "scenario:tokened".to_string(),
         br#"{"marker":"at-plus"}"#.to_vec(),
         Some(upsert_opts(0)),
@@ -726,7 +752,7 @@ async fn scenario() -> Vec<String> {
             );
             r.ok(
                 "30 query-consistent-with-real-token",
-                sqlpp::query(
+                query_consumer::query(
                     "SELECT RAW d.marker FROM _default AS d USE KEYS $1".to_string(),
                     vec![SqlppValue::Json("\"scenario:tokened\"".to_string())],
                     Some(SqlppQueryOptions {
@@ -749,7 +775,10 @@ async fn scenario() -> Vec<String> {
                 describe_query,
             );
         }
-        Err(e) => r.push("29 mutation-token-parsed", format!("UNEXPECTED-ERR {}", describe(&e))),
+        Err(e) => r.push(
+            "29 mutation-token-parsed",
+            format!("UNEXPECTED-ERR {}", describe(&e)),
+        ),
     }
 
     // A document written with a TTL has to report that expiry when asked for it.
@@ -758,8 +787,8 @@ async fn scenario() -> Vec<String> {
     // ignored `with-expiry` would still return the document, so the step checks
     // the field itself — and that it is in the future, not a placeholder.
     let ek = "scenario:expiry";
-    let _ = document::remove(ek.to_string(), None).await;
-    let written = document::upsert(
+    let _ = write::remove(ek.to_string(), None).await;
+    let written = write::upsert(
         ek.to_string(),
         r#"{"e":1}"#.as_bytes().to_vec(),
         Some(upsert_opts(3600 * SECOND_NS)),
@@ -768,10 +797,16 @@ async fn scenario() -> Vec<String> {
     r.push(
         "31 get-with-expiry",
         match written {
-            Err(e) => format!("UNEXPECTED-ERR writing a document with a TTL: {}", describe(&e)),
-            Ok(_) => match document::get(
+            Err(e) => format!(
+                "UNEXPECTED-ERR writing a document with a TTL: {}",
+                describe(&e)
+            ),
+            Ok(_) => match read::get(
                 ek.to_string(),
-                Some(DocumentGetOptions { with_expiry: true, ..get_opts(None) }),
+                Some(DocumentGetOptions {
+                    with_expiry: true,
+                    ..get_opts(None)
+                }),
             )
             .await
             {
@@ -780,7 +815,9 @@ async fn scenario() -> Vec<String> {
                         format!("OK expires-at={:04}-{:02}-{:02}", t.year, t.month, t.day)
                     }
                     Some(t) => format!("UNEXPECTED-OK expires-at is in the past: year {}", t.year),
-                    None => "UNEXPECTED-OK with-expiry was set but no expires-at came back".to_string(),
+                    None => {
+                        "UNEXPECTED-OK with-expiry was set but no expires-at came back".to_string()
+                    }
                 },
                 Err(e) => format!("UNEXPECTED-ERR {}", describe(&e)),
             },
@@ -792,7 +829,7 @@ async fn scenario() -> Vec<String> {
     // would not be.
     r.push(
         "34 get-any-replicas",
-        match document::get_any_replicas(k.to_string(), None).await {
+        match read::get_any_replicas(k.to_string(), None).await {
             Err(DocumentError::Unsupported(_)) => "OK unsupported on this transport".to_string(),
             Ok(g) => format!("OK is-replica={} cas={}", g.is_replica, g.cas),
             Err(e) => format!("UNEXPECTED-ERR {}", describe(&e)),
@@ -801,7 +838,7 @@ async fn scenario() -> Vec<String> {
 
     r.ok(
         "32 upsert-binary-document",
-        document::upsert(
+        write::upsert(
             "scenario:binary".to_string(),
             blob.clone(),
             Some(DocumentUpsertOptions {
@@ -815,7 +852,7 @@ async fn scenario() -> Vec<String> {
     );
     r.ok(
         "33 binary-round-trips-byte-for-byte",
-        document::get("scenario:binary".to_string(), None).await,
+        read::get("scenario:binary".to_string(), None).await,
         move |g| {
             format!(
                 "bytes={:?} identical={} flags=0x{:08x}",
@@ -841,11 +878,11 @@ async fn scenario() -> Vec<String> {
     );
 
     let durable_id = "scenario:durable";
-    let _ = document::remove(durable_id.into(), None).await;
+    let _ = write::remove(durable_id.into(), None).await;
     r.push(
         "37 insert-durability",
         durable_outcome(
-            document::insert(
+            write::insert(
                 durable_id.into(),
                 br#"{"marker":1}"#.to_vec(),
                 Some(DocumentInsertOptions {
@@ -857,11 +894,11 @@ async fn scenario() -> Vec<String> {
         ),
     );
     // Seed independently: the preceding insert may have been refused.
-    let _ = document::upsert(durable_id.into(), br#"{"marker":1}"#.to_vec(), None).await;
+    let _ = write::upsert(durable_id.into(), br#"{"marker":1}"#.to_vec(), None).await;
     r.push(
         "38 upsert-durability",
         durable_outcome(
-            document::upsert(
+            write::upsert(
                 durable_id.into(),
                 br#"{"marker":2}"#.to_vec(),
                 Some(DocumentUpsertOptions {
@@ -875,7 +912,7 @@ async fn scenario() -> Vec<String> {
     r.push(
         "39 replace-durability",
         durable_outcome(
-            document::replace(
+            write::replace(
                 durable_id.into(),
                 br#"{"marker":3}"#.to_vec(),
                 Some(DocumentReplaceOptions {
@@ -889,7 +926,7 @@ async fn scenario() -> Vec<String> {
     r.push(
         "40 remove-durability",
         durable_outcome(
-            document::remove(
+            write::remove(
                 durable_id.into(),
                 Some(DocumentRemoveOptions {
                     durability_level: DurabilityLevel::PersistMajority,

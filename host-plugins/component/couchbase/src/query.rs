@@ -21,6 +21,7 @@ pub enum Failure {
     Timeout,
     Server(String),
     Unexpected(String),
+    RequestFailed(String),
 }
 
 fn http_failure(status: u16, message: String) -> Failure {
@@ -32,17 +33,9 @@ fn http_failure(status: u16, message: String) -> Failure {
     }
 }
 
-/// Decode a Query Service envelope, checking both its HTTP status and its
-/// statement-level errors before treating absent results as an empty result.
-pub fn parse_response(status: u16, payload: &[u8]) -> Result<Value, Failure> {
+/// Check bounded service metadata after rows have been decoded separately.
+pub fn check_metadata(status: u16, parsed: &Value) -> Result<(), Failure> {
     let successful = (200..300).contains(&status);
-    let parsed: Value = serde_json::from_slice(payload).map_err(|error| {
-        if successful {
-            Failure::Unexpected(format!("the query service did not answer JSON: {error}"))
-        } else {
-            http_failure(status, String::from_utf8_lossy(payload).into_owned())
-        }
-    })?;
     if let Some(error) = parsed
         .get("errors")
         .and_then(Value::as_array)
@@ -77,13 +70,7 @@ pub fn parse_response(status: u16, payload: &[u8]) -> Result<Value, Failure> {
             "the query service did not return an object".to_string(),
         ));
     }
-    match parsed.get("results") {
-        Some(Value::Array(rows)) => Ok(Value::Array(rows.clone())),
-        None => Ok(Value::Array(Vec::new())),
-        Some(_) => Err(Failure::Unexpected(
-            "query results are not an array".to_string(),
-        )),
-    }
+    Ok(())
 }
 
 /// Build a sparse scan vector from `(partition, uuid, sequence)` tokens.
@@ -122,11 +109,17 @@ pub fn scan_vector(tokens: impl IntoIterator<Item = (u64, u64, u64)>) -> Option<
 mod tests {
     use super::*;
 
+    fn check(status: u16, payload: &[u8]) -> Result<(), Failure> {
+        let metadata = serde_json::from_slice(payload)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(payload).into_owned()));
+        check_metadata(status, &metadata)
+    }
+
     #[test]
     fn query_service_deadlines_keep_their_timeout_classification() {
         let body = br#"{"errors":[{"code":1080,"msg":"Timeout 1ms exceeded"}],"status":"timeout"}"#;
         for status in [200, 400, 500] {
-            assert_eq!(parse_response(status, body), Err(Failure::Timeout));
+            assert_eq!(check(status, body), Err(Failure::Timeout));
         }
     }
 
@@ -142,14 +135,11 @@ mod tests {
     #[test]
     fn http_failures_without_a_query_error_array_cannot_become_empty_results() {
         let payload = br#"{"message":"query service temporarily unavailable"}"#;
+        assert!(matches!(check(503, payload), Err(Failure::Server(_))));
+        assert_eq!(check(401, payload), Err(Failure::Unauthorized));
+        assert_eq!(check(504, payload), Err(Failure::Timeout));
         assert!(matches!(
-            parse_response(503, payload),
-            Err(Failure::Server(_))
-        ));
-        assert_eq!(parse_response(401, payload), Err(Failure::Unauthorized));
-        assert_eq!(parse_response(504, payload), Err(Failure::Timeout));
-        assert!(matches!(
-            parse_response(503, b"unavailable"),
+            check(503, b"unavailable"),
             Err(Failure::Server(_))
         ));
     }
@@ -157,25 +147,16 @@ mod tests {
     #[test]
     fn statement_errors_and_successful_empty_mutations_are_distinguished() {
         assert!(matches!(
-            parse_response(200, br#"{"errors":[{"code":3000,"msg":"syntax"}]}"#),
+            check(200, br#"{"errors":[{"code":3000,"msg":"syntax"}]}"#),
             Err(Failure::InvalidArgument(_))
         ));
         assert!(matches!(
-            parse_response(200, br#"{"errors":[{"code":5000,"msg":"failure"}]}"#),
+            check(200, br#"{"errors":[{"code":5000,"msg":"failure"}]}"#),
             Err(Failure::Server(_))
         ));
-        assert_eq!(
-            parse_response(200, br#"{"results":[1,2]}"#),
-            Ok(serde_json::json!([1, 2]))
-        );
-        assert_eq!(
-            parse_response(200, br#"{"status":"success"}"#),
-            Ok(serde_json::json!([]))
-        );
-        assert!(matches!(
-            parse_response(200, b"[]"),
-            Err(Failure::Unexpected(_))
-        ));
+        assert_eq!(check(200, br#"{"results":[1,2]}"#), Ok(()));
+        assert_eq!(check(200, br#"{"status":"success"}"#), Ok(()));
+        assert!(matches!(check(200, b"[]"), Err(Failure::Unexpected(_))));
     }
 
     #[test]

@@ -1,19 +1,11 @@
-package wasmcloud:couchbase@0.2.0;
+package wasmcloud:couchbase@0.3.0;
 
-/// The asynchronous successor to `wasmcloud:couchbase@0.1.0-draft`.
+/// Asynchronous Couchbase capabilities, scoped to a configured keyspace.
 ///
-/// The published 0.1.0-draft package (see the `wasmcloud-provider-couchbase`
-/// provider) is entirely synchronous. A wasmCloud **component host plugin**
-/// serves its capability across a store boundary, and the cross-store shim
-/// registers and type-matches only asynchronous imports — so a synchronous
-/// interface cannot be served by one at all. This package is therefore the same
-/// API with `async func` throughout, exactly as `wasmcloud:secrets` was revised
-/// from `1.0.0` to `2.0.0` for the same reason.
-///
-/// Names, records, option fields and function signatures are kept identical to
-/// 0.1.0-draft wherever possible so porting is a matter of adding `.await`.
-/// Every intentional difference is called out in a `DIFFERS FROM 0.1.0-draft`
-/// note at the point it occurs.
+/// Import document-read for reads, document-write for mutations and locking,
+/// and sqlpp for arbitrary SQL++ statements. SQL++ may mutate data unless the
+/// request is read-only and database RBAC forbids writes.
+/// Version 0.3.0 separates document grants and streams query rows.
 
 /// General types that can be used throughout the couchbase interface
 @since(version = 0.2.0)
@@ -167,9 +159,8 @@ interface types {
   ///
   /// The `document-value` resource is gone with it. It existed to offer an
   /// "efficient implementer-specific" JSON representation, but a resource a
-  /// caller constructs cannot cross a component host plugin's store boundary
-  /// (see the note on the `document` interface), and in practice it wrapped a
-  /// string anyway. `list<u8>` is both the honest model and the portable one.
+  /// caller constructs requires shared resource ownership. Owned bytes give
+  /// every caller the same representation without a document-specific handle.
   type document = list<u8>;
 
   /// Errors related to bucket usage
@@ -285,88 +276,15 @@ interface types {
   record mutation-state {
     tokens: list<mutation-token>,
   }
-}
 
-/// Mappings of SQL++ (formerly known as N1QL) to WebAssembly (WIT) types
-///
-@since(version = 0.2.0)
-interface sqlpp-types {
-  use types.{json-string};
 
-  /// Errors that can occur when a SQL++ query is performed
-  variant sqlpp-query-error {
-    /// A completely unexpected query error
-    unexpected(string),
-
-    // -------------------------------------------------------------------
-    // DIFFERS FROM 0.1.0-draft: additions, for the same reason as the
-    // `document-error` additions above — a lone `unexpected(string)` cannot
-    // distinguish a syntax error from a refused credential from an
-    // unreachable cluster.
-    // -------------------------------------------------------------------
-
-    /// The statement was rejected as malformed, by this implementation or by
-    /// the cluster. Carries the cluster's own message where there is one.
-    invalid-argument(string),
-    /// The configured credentials were refused.
-    unauthorized,
-    /// The caller has no Couchbase binding, or it is missing configuration.
-    not-configured(string),
-    /// The cluster could not be reached.
-    request-failed(string),
-    /// The query did not complete within its time limit.
-    timeout,
-    /// The cluster reported an error that maps to no case above.
-    server(string),
-  }
-
-  /// An embedding of SQL++ values to WebAssembly types
-  ///
-  /// This type should be used in building queries, and also in parsing/processing results,
-  /// as it is used for both parameters and returned results from queries.
-  variant sqlpp-value {
-    /// A NULL value
-    null,
-
-    // -------------------------------------------------------------------
-    // DIFFERS FROM 0.1.0-draft: `json` is an addition.
-    //
-    // 0.1.0-draft declares `sqlpp-value` with `null` as its only case, which
-    // cannot carry a parameter into a query or a row out of one. Rather than
-    // enumerate a JSON tree — which WIT cannot express recursively, the same
-    // constraint `document` works around — a value travels as JSON text, the
-    // approach `document.raw` already established in this package.
-    // -------------------------------------------------------------------
-
-    /// A value as UTF-8 JSON text: `"\"LAX\""` for a string, `42` for a
-    /// number, `{"a":1}` for an object. A query's whole result set arrives as
-    /// a JSON array of rows.
-    json(json-string),
-  }
-}
-
-/// Support CRUD access and modification of Documents stored in a Couchbase cluster.
-///
-/// Reference: https://docs.couchbase.com/c-sdk/current/concept-docs/documents.html
-///
-/// DIFFERS FROM 0.1.0-draft: every function is an `async func`. Signatures,
-/// names and option records are otherwise unchanged.
-///
-/// Which bucket, scope and collection these operate on is not a parameter here,
-/// exactly as in 0.1.0-draft: it comes from the caller's link/interface
-/// configuration.
-@since(version = 0.2.0)
-interface document {
-  use types.{
-      document, document-flags, document-id, document-error, mutation-metadata, time, durability-level,
-      retry-strategy, request-span, replica-read-level
-  };
 
   /////////////////////////
   /// Document - Insert ///
   /////////////////////////
 
   /// Options for performing a document insert
+  @since(version = 0.3.0)
   record document-insert-options {
     /// When the document should expire (nanoseconds)
     expires-in-ns: u64,
@@ -405,18 +323,14 @@ interface document {
     parent-span: option<request-span>,
   }
 
-  /// Insert a document with a new ID
-  insert: async func(
-    id: document-id,
-    doc: document,
-    options: option<document-insert-options>,
-  ) -> result<mutation-metadata, document-error>;
+
 
   //////////////////////////
   /// Document - Replace ///
   //////////////////////////
 
   /// Options for performing a document replace
+  @since(version = 0.3.0)
   record document-replace-options {
     /// CAS revision of the document
     cas: u64,
@@ -454,18 +368,14 @@ interface document {
     parent-span: option<request-span>,
   }
 
-  /// Replace an existing document
-  replace: async func(
-    id: document-id,
-    doc: document,
-    options: option<document-replace-options>,
-  ) -> result<mutation-metadata, document-error>;
+
 
   /////////////////////////
   /// Document - Upsert ///
   /////////////////////////
 
   /// Options for performing a document upsert
+  @since(version = 0.3.0)
   record document-upsert-options {
     /// When the document should expire (nanoseconds)
     expires-in-ns: u64,
@@ -500,18 +410,14 @@ interface document {
     parent-span: option<request-span>,
   }
 
-  /// Insert a document, or replace it if it already exists
-  upsert: async func(
-    id: document-id,
-    doc: document,
-    options: option<document-upsert-options>,
-  ) -> result<mutation-metadata, document-error>;
+
 
   //////////////////////
   /// Document - Get ///
   //////////////////////
 
   /// Options for performing a document get
+  @since(version = 0.3.0)
   record document-get-options {
     /// Whether expiry should also be retreived
     with-expiry: bool,
@@ -533,7 +439,10 @@ interface document {
     parent-span: option<request-span>,
   }
 
+
+
   /// Options for retrieving a document from any replica
+  @since(version = 0.3.0)
   record document-get-any-replica-options {
     /// Timeout that should be used, in nanoseconds
     timeout-ns: option<u64>,
@@ -545,7 +454,10 @@ interface document {
     parent-span: option<request-span>,
   }
 
+
+
   /// Options for retrieving a document from all replicas
+  @since(version = 0.3.0)
   record document-get-all-replica-options {
     /// Timeout that should be used, in nanoseconds
     timeout-ns: option<u64>,
@@ -557,7 +469,10 @@ interface document {
     parent-span: option<request-span>,
   }
 
+
+
   /// Result of a successfully executed document get
+  @since(version = 0.3.0)
   record document-get-result {
     /// Document that was retrieved
     document: document,
@@ -581,15 +496,9 @@ interface document {
   }
 
 
-  /// Retrieve a document by ID
-  ///
-  /// A missing document is `document-error.not-found`, matching 0.1.0-draft.
-  get: async func(
-    id: document-id,
-    options: option<document-get-options>,
-  ) -> result<document-get-result, document-error>;
 
   /// Result from a replica-aware document get
+  @since(version = 0.3.0)
   record document-get-replica-result {
     /// Whether this document came from a replica rather than the active node.
     is-replica: bool,
@@ -613,33 +522,7 @@ interface document {
     expires-at: option<time>,
   }
 
-  /// Retrieve a document by ID from the active node or any replica, whichever
-  /// answers first.
-  ///
-  /// A replica may be stale: it holds what it has received so far, which can
-  /// lag the active copy. Use it to stay readable while the active node is
-  /// unavailable, not to read your own writes.
-  ///
-  /// `document-error.unretrievable` when no copy answers.
-  ///
-  /// Requires a transport that can address replicas. Implementations that
-  /// cannot return `document-error.unsupported`.
-  get-any-replicas: async func(
-    id: document-id,
-    options: option<document-get-any-replica-options>,
-  ) -> result<document-get-replica-result, document-error>;
 
-  /// Retrieve every available copy of a document, active and replica.
-  ///
-  /// The copies may disagree: each carries its own CAS, and `is-replica` says
-  /// which is the active one. Bounded by the bucket's replica count.
-  ///
-  /// Requires a transport that can address replicas. Implementations that
-  /// cannot return `document-error.unsupported`.
-  get-all-replicas: async func(
-    id: document-id,
-    options: option<document-get-all-replica-options>,
-  ) -> result<list<document-get-replica-result>, document-error>;
 
 
 
@@ -650,6 +533,7 @@ interface document {
   /////////////////////////
 
   /// Options for performing a document remove
+  @since(version = 0.3.0)
   record document-remove-options {
     /// CAS revision of the document
     cas: u64,
@@ -675,17 +559,14 @@ interface document {
     parent-span: option<request-span>,
   }
 
-  /// Remove a document by ID
-  remove: async func(
-    id: document-id,
-    options: option<document-remove-options>,
-  ) -> result<mutation-metadata, document-error>;
+
 
   ///////////////////////////////
   /// Document - Get and Lock ///
   ///////////////////////////////
 
   /// Options for performing a document lock
+  @since(version = 0.3.0)
   record document-get-and-lock-options {
     /// Amount of time to lock the document (nanoseconds)
     lock-time: u64,
@@ -700,21 +581,14 @@ interface document {
     parent-span: option<request-span>,
   }
 
-  /// Retrieve and lock a document by ID
-  ///
-  /// The returned CAS is the lock's: only that value unlocks the document, and
-  /// only it writes through the lock. The lock lapses on its own, so a caller
-  /// that dies does not hold it forever.
-  get-and-lock: async func(
-    id: document-id,
-    options: option<document-get-and-lock-options>,
-  ) -> result<document-get-result, document-error>;
+
 
   /////////////////////////
   /// Document - Unlock ///
   /////////////////////////
 
   /// Options for performing a document unlock
+  @since(version = 0.3.0)
   record document-unlock-options {
     /// CAS revision of the document
     cas: u64,
@@ -729,19 +603,14 @@ interface document {
     parent-span: option<request-span>,
   }
 
-  /// Release a lock taken by `get-and-lock`
-  ///
-  /// See `get-and-lock` on which implementations can serve this.
-  unlock: async func(
-    id: document-id,
-    options: option<document-unlock-options>,
-  ) -> result<_, document-error>;
+
 
   ////////////////////////
   /// Document - Touch ///
   ////////////////////////
 
   /// Options for performing a document touch
+  @since(version = 0.3.0)
   record document-touch-options {
     /// Time until the document expires (nanoseconds)
     expires-in: u64,
@@ -756,17 +625,14 @@ interface document {
     parent-span: option<request-span>,
   }
 
-  /// Update a document's expiry without changing its content
-  touch: async func(
-    id: document-id,
-    options: option<document-touch-options>,
-  ) -> result<mutation-metadata, document-error>;
+
 
   ////////////////////////////////
   /// Document - Get and Touch ///
   ////////////////////////////////
 
   /// Options for performing a document touch
+  @since(version = 0.3.0)
   record document-get-and-touch-options {
     /// Time until the document expires (nanoseconds)
     expires-in: u64,
@@ -780,6 +646,205 @@ interface document {
     /// A known span to associate this lookup with
     parent-span: option<request-span>,
   }
+}
+
+/// Mappings of SQL++ (formerly known as N1QL) to WebAssembly (WIT) types
+///
+@since(version = 0.2.0)
+interface sqlpp-types {
+  use types.{json-string};
+
+  /// Errors that can occur when a SQL++ query is performed
+  variant sqlpp-query-error {
+    /// A completely unexpected query error
+    unexpected(string),
+
+    // -------------------------------------------------------------------
+    // DIFFERS FROM 0.1.0-draft: additions, for the same reason as the
+    // `document-error` additions above — a lone `unexpected(string)` cannot
+    // distinguish a syntax error from a refused credential from an
+    // unreachable cluster.
+    // -------------------------------------------------------------------
+
+    /// The statement was rejected as malformed, by this implementation or by
+    /// the cluster. Carries the cluster's own message where there is one.
+    invalid-argument(string),
+    /// The configured credentials were refused.
+    unauthorized,
+    /// The caller has no Couchbase binding, or it is missing configuration.
+    not-configured(string),
+    /// The cluster could not be reached.
+    request-failed(string),
+    /// The query did not complete within its time limit.
+    timeout,
+    /// The cluster reported an error that maps to no case above.
+    server(string),
+  }
+
+  /// A SQL++ parameter. JSON text is validated before dispatch.
+  /// Result rows travel directly as JSON strings in the row stream.
+  variant sqlpp-value {
+    /// A NULL value
+    null,
+
+    // -------------------------------------------------------------------
+    // DIFFERS FROM 0.1.0-draft: `json` is an addition.
+    //
+    // 0.1.0-draft declares `sqlpp-value` with `null` as its only case, which
+    // cannot carry a parameter into a query or a row out of one. Rather than
+    // enumerate a JSON tree — which WIT cannot express recursively, the same
+    // constraint `document` works around — a value travels as JSON text, the
+    // approach `document.raw` already established in this package.
+    // -------------------------------------------------------------------
+
+    /// A value as UTF-8 JSON text: `"\"LAX\""` for a string, `42` for a
+    /// number, `{"a":1}` for an object. Query rows use JSON text directly.
+    json(json-string),
+  }
+}
+
+/// Read documents without changing content, expiry or locks.
+@since(version = 0.3.0)
+interface document-read {
+  use types.{
+    document-id,
+    document-error,
+    document-get-options,
+    document-get-any-replica-options,
+    document-get-all-replica-options,
+    document-get-result,
+    document-get-replica-result,
+  };
+
+
+
+
+  /// Retrieve a document by ID
+  ///
+  /// A missing document is `document-error.not-found`, matching 0.1.0-draft.
+  get: async func(
+    id: document-id,
+    options: option<document-get-options>,
+  ) -> result<document-get-result, document-error>;
+
+
+
+  /// Retrieve a document by ID from the active node or any replica, whichever
+  /// answers first.
+  ///
+  /// A replica may be stale: it holds what it has received so far, which can
+  /// lag the active copy. Use it to stay readable while the active node is
+  /// unavailable, not to read your own writes.
+  ///
+  /// `document-error.unretrievable` when no copy answers.
+  ///
+  /// Requires a transport that can address replicas. Implementations that
+  /// cannot return `document-error.unsupported`.
+  get-any-replicas: async func(
+    id: document-id,
+    options: option<document-get-any-replica-options>,
+  ) -> result<document-get-replica-result, document-error>;
+
+
+
+  /// Retrieve every available copy of a document, active and replica.
+  ///
+  /// The copies may disagree: each carries its own CAS, and `is-replica` says
+  /// which is the active one. Bounded by the bucket's replica count.
+  ///
+  /// Requires a transport that can address replicas. Implementations that
+  /// cannot return `document-error.unsupported`.
+  get-all-replicas: async func(
+    id: document-id,
+    options: option<document-get-all-replica-options>,
+  ) -> result<list<document-get-replica-result>, document-error>;
+}
+
+/// Mutate documents, change expiry, and acquire or release locks.
+@since(version = 0.3.0)
+interface document-write {
+  use types.{
+    document,
+    document-id,
+    document-error,
+    mutation-metadata,
+    document-insert-options,
+    document-replace-options,
+    document-upsert-options,
+    document-remove-options,
+    document-get-and-lock-options,
+    document-unlock-options,
+    document-touch-options,
+    document-get-and-touch-options,
+    document-get-result,
+  };
+
+
+
+  /// Insert a document with a new ID
+  insert: async func(
+    id: document-id,
+    doc: document,
+    options: option<document-insert-options>,
+  ) -> result<mutation-metadata, document-error>;
+
+
+
+  /// Replace an existing document
+  replace: async func(
+    id: document-id,
+    doc: document,
+    options: option<document-replace-options>,
+  ) -> result<mutation-metadata, document-error>;
+
+
+
+  /// Insert a document, or replace it if it already exists
+  upsert: async func(
+    id: document-id,
+    doc: document,
+    options: option<document-upsert-options>,
+  ) -> result<mutation-metadata, document-error>;
+
+
+
+  /// Remove a document by ID
+  remove: async func(
+    id: document-id,
+    options: option<document-remove-options>,
+  ) -> result<mutation-metadata, document-error>;
+
+
+
+  /// Retrieve and lock a document by ID
+  ///
+  /// The returned CAS is the lock's: only that value unlocks the document, and
+  /// only it writes through the lock. The lock lapses on its own, so a caller
+  /// that dies does not hold it forever.
+  get-and-lock: async func(
+    id: document-id,
+    options: option<document-get-and-lock-options>,
+  ) -> result<document-get-result, document-error>;
+
+
+
+  /// Release a lock taken by `get-and-lock`
+  ///
+  /// See `get-and-lock` on which implementations can serve this.
+  unlock: async func(
+    id: document-id,
+    options: option<document-unlock-options>,
+  ) -> result<_, document-error>;
+
+
+
+  /// Update a document's expiry without changing its content
+  touch: async func(
+    id: document-id,
+    options: option<document-touch-options>,
+  ) -> result<mutation-metadata, document-error>;
+
+
 
   /// Retrieve and Touch a document by ID
   get-and-touch: async func(
@@ -792,7 +857,7 @@ interface document {
 ///
 /// Reference: https://docs.couchbase.com/server/current/n1ql/n1ql-language-reference/index.html
 ///
-/// DIFFERS FROM 0.1.0-draft: `query` is an `async func`. Otherwise unchanged.
+/// Queries stream JSON rows and require an explicit final status check.
 @since(version = 0.2.0)
 interface sqlpp {
   use types.{mutation-state, query-scan-consistency, query-profile-mode, retry-strategy, request-span};
@@ -894,15 +959,39 @@ interface sqlpp {
 
   }
 
+  /// The final status of a streamed query.
+  ///
+  /// Retain this handle while reading rows. Dropping it cancels the query and
+  /// closes its row stream. It owns no caller-supplied resources.
+  @since(version = 0.3.0)
+  resource query-completion {
+    /// Consume this handle and wait for final query and transport status.
+    /// Drain rows first: waiting here before consuming can block until the
+    /// query deadline. Stream EOF alone does not mean success.
+    finish: static async func(this: query-completion) -> result<_, sqlpp-query-error>;
+  }
+
+  /// A query's row stream and final-status handle.
+  @since(version = 0.3.0)
+  record query-result {
+    /// One complete UTF-8 JSON value per item, in service order.
+    /// Rows are provisional until completion.finish succeeds.
+    rows: stream<string>,
+    /// Check after draining rows; drop to cancel outstanding work.
+    completion: query-completion,
+  }
+
   /// Perform a N1QL query
   ///
   /// Note: you may *only* use positional parameters in your query
   ///
-  /// The result is a `sqlpp-value.json` holding the service's `results` array
-  /// as JSON text — one element per row.
+  /// Rows arrive incrementally with backpressure. Parameter and request
+  /// failures return immediately; later service, decoding and transport
+  /// failures are reported by query-completion.finish. Callers must not
+  /// treat rows or EOF as a successful query before that check.
   query: async func(
     query: string,
     params: list<sqlpp-value>,
     options: option<sqlpp-query-options>,
-  ) -> result<sqlpp-value, sqlpp-query-error>;
+  ) -> result<query-result, sqlpp-query-error>;
 }

@@ -108,11 +108,17 @@ async fn couchbase_tls_and_https_scenario() -> Result<()> {
     let couchbase = WitInterface {
         namespace: "wasmcloud".into(),
         package: "couchbase".into(),
-        interfaces: ["types", "sqlpp-types", "document", "sqlpp"]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-        version: Some(semver::Version::parse("0.2.0")?),
+        interfaces: [
+            "types",
+            "sqlpp-types",
+            "document-read",
+            "document-write",
+            "sqlpp",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
+        version: Some(semver::Version::parse("0.3.0")?),
         name: None,
         config: HashMap::from([
             (
@@ -178,6 +184,61 @@ async fn couchbase_tls_and_https_scenario() -> Result<()> {
             .any(|marker| body.contains(marker)),
         "{body}"
     );
+    let mut reader = request.clone();
+    reader.workload_id = uuid::Uuid::new_v4().to_string();
+    reader.workload.components[0].bytes = bytes::Bytes::from(std::fs::read(root.join(
+        "../../../tests/probe/target/read-only/wasm32-wasip2/release/component_fault_probe.wasm",
+    ))?);
+    reader.workload.host_interfaces[1].interfaces = ["types", "document-read"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let started = host.workload_start(reader).await?;
+    assert_eq!(
+        started.workload_status.workload_state,
+        WorkloadState::Running,
+        "{}",
+        started.workload_status.message
+    );
+    let read = reqwest::Client::new()
+        .get(format!("http://{ingress_addr}/scenario:binary"))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(read.contains("READ OK"), "{read}");
+
+    let mut denied = request.clone();
+    denied.workload_id = uuid::Uuid::new_v4().to_string();
+    denied.workload.host_interfaces[1]
+        .interfaces
+        .remove("document-write");
+    let rejection = match host.workload_start(denied).await {
+        Ok(result) => {
+            assert_eq!(result.workload_status.workload_state, WorkloadState::Error);
+            result.workload_status.message
+        }
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(rejection.contains("document-write"), "{rejection}");
+
+    let mut conflicting = request.clone();
+    conflicting.workload_id = uuid::Uuid::new_v4().to_string();
+    let mut write_binding = conflicting.workload.host_interfaces[1].clone();
+    conflicting.workload.host_interfaces[1].interfaces =
+        ["document-read"].into_iter().map(String::from).collect();
+    write_binding.interfaces.remove("document-read");
+    write_binding.config.insert("bucket", "another-bucket");
+    conflicting.workload.host_interfaces.push(write_binding);
+    let rejection = match host.workload_start(conflicting).await {
+        Ok(result) => {
+            assert_eq!(result.workload_status.workload_state, WorkloadState::Error);
+            result.workload_status.message
+        }
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(rejection.contains("conflicting"), "{rejection}");
     for (endpoint, reason) in [
         (
             format!("couchbases://127.255.255.254:{kv_port}"),

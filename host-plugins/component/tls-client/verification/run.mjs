@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { buildComponents } from '../../../../tests/component-build.mjs';
+import { buildComponents, buildComponentFeature } from '../../../../tests/component-build.mjs';
 import { startCouchbaseTlsFixture } from '../../couchbase-wasi-sockets-p3/verification/fixture.mjs';
 
 async function main() {
@@ -48,11 +48,8 @@ async function main() {
     if (values.couchbase) {
       const couchbase = resolve(root, '../couchbase-wasi-sockets-p3');
       buildComponents([resolve(root, '../couchbase/verification/scenario')], environment);
-      execFileSync('wash', ['wit', 'fetch'], { cwd: couchbase, env: environment, stdio: 'inherit' });
-      execFileSync('cargo', ['build', '--locked', '--target', 'wasm32-wasip2', '--release', '--features', 'tls',
-        '--target-dir', join(couchbase, 'target/tls')], {
-        cwd: couchbase, env: environment, stdio: 'inherit',
-      });
+      buildComponentFeature(couchbase, 'tls', environment);
+      buildComponentFeature(resolve(root, '../../../tests/probe'), 'read-only', environment);
     }
   }
   const harness = await mkdtemp(join(tmpdir(), 'tls-client-verification-'));

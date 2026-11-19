@@ -4,10 +4,7 @@
 //! Compiled only for wasm. Everything that can be decided without the bindings
 //! lives in [`crate::api`], [`crate::config`] and [`crate::timefmt`].
 
-mod bindings {
-    #![allow(unsafe_code)]
-    wit_bindgen::generate!({ world: "couchbase-plugin", generate_all });
-}
+use crate::bindings;
 
 use std::sync::{Mutex, PoisonError};
 
@@ -18,18 +15,21 @@ use crate::timefmt;
 use crate::transport;
 use crate::workload_bindings::WorkloadBindings;
 
-use bindings::exports::wasmcloud::couchbase::document::{
-    DocumentGetAllReplicaOptions, DocumentGetAndLockOptions, DocumentGetAndTouchOptions,
-    DocumentGetAnyReplicaOptions, DocumentGetOptions, DocumentGetReplicaResult, DocumentGetResult,
-    DocumentInsertOptions, DocumentRemoveOptions, DocumentReplaceOptions, DocumentTouchOptions,
-    DocumentUnlockOptions, DocumentUpsertOptions, Guest as DocumentGuest,
-};
 use bindings::exports::wasmcloud::couchbase::sqlpp::{
-    Guest as SqlppGuest, SqlppQueryOptions, SqlppValue,
+    Guest as SqlppGuest, QueryResult, SqlppQueryOptions, SqlppValue,
 };
 use bindings::exports::wasmcloud::couchbase::sqlpp_types::SqlppQueryError;
 use bindings::exports::wasmcloud::couchbase::types::{
     Document, DocumentError, DurabilityLevel, MutationMetadata, ReplicaReadLevel, Time,
+};
+use bindings::exports::wasmcloud::couchbase::types::{
+    DocumentGetAllReplicaOptions, DocumentGetAndLockOptions, DocumentGetAndTouchOptions,
+    DocumentGetAnyReplicaOptions, DocumentGetOptions, DocumentGetReplicaResult, DocumentGetResult,
+    DocumentInsertOptions, DocumentRemoveOptions, DocumentReplaceOptions, DocumentTouchOptions,
+    DocumentUnlockOptions, DocumentUpsertOptions,
+};
+use bindings::exports::wasmcloud::couchbase::{
+    document_read::Guest as ReadGuest, document_write::Guest as WriteGuest,
 };
 use bindings::exports::wasmcloud::host::workload_lifecycle::{
     Guest as LifecycleGuest, WorkloadInfo,
@@ -80,6 +80,12 @@ impl LifecycleGuest for Component {
                     workload.name, workload.namespace
                 )
             })?;
+            if bound
+                .iter()
+                .any(|(name, existing)| name == &iface.name && existing != &binding)
+            {
+                return Err("conflicting Couchbase configuration for one binding; use one shared config or distinct named imports".into());
+            }
             bound.push((iface.name.clone(), binding));
         }
 
@@ -190,28 +196,6 @@ fn to_document_error(failure: Failure) -> DocumentError {
     }
 }
 
-fn to_query_error(failure: Failure) -> SqlppQueryError {
-    match failure {
-        Failure::InvalidArgument(m) => SqlppQueryError::InvalidArgument(m),
-        Failure::Unauthorized => SqlppQueryError::Unauthorized,
-        Failure::Timeout => SqlppQueryError::Timeout,
-        Failure::NotFound => SqlppQueryError::InvalidArgument(
-            "the statement referenced a keyspace that does not exist".to_string(),
-        ),
-        Failure::AlreadyExists | Failure::CasMismatch | Failure::Locked | Failure::NotLocked => {
-            SqlppQueryError::Unexpected("unexpected document conflict from a query".to_string())
-        }
-        Failure::Server {
-            status,
-            code,
-            message,
-        } => SqlppQueryError::Server(format!(
-            "HTTP {status}{}: {message}",
-            code.map(|c| format!(" ({c})")).unwrap_or_default()
-        )),
-    }
-}
-
 /// A `document-error` restated as a `sqlpp-query-error`, so the query path can
 /// reuse the shared binding/transport helpers without losing its meaning.
 fn document_error_as_query_error(err: DocumentError) -> SqlppQueryError {
@@ -249,80 +233,7 @@ async fn send_inner(
     extra_headers: &[(&str, String)],
     body: Option<Vec<u8>>,
 ) -> Result<Reply, DocumentError> {
-    // Cancellation is checked before committing to a round-trip. A capability
-    // call has no host-imposed timeout, so a teardown arriving while calls are
-    // queued returns them immediately rather than waiting out the cluster.
-    if cancel::is_cancelled() {
-        return Err(DocumentError::Other(
-            "invocation was cancelled before the request was sent".to_string(),
-        ));
-    }
-
-    let fields = Fields::new();
-    set_header(&fields, "authorization", &binding.authorization)?;
-    set_header(&fields, "accept", "application/json")?;
-    for (name, value) in extra_headers {
-        set_header(&fields, name, value)?;
-    }
-
-    // Declare the body length up front, including the zero-length case. The
-    // payload is always a complete `Vec<u8>`, but a `wasi:http` request body is
-    // a stream, so without this the transport has no length to advertise and
-    // falls back to `Transfer-Encoding: chunked` on every request — even a
-    // `DELETE` carrying no body at all. Plenty of API gateways and WAFs in
-    // front of a database handle a chunked request body poorly or reject it
-    // outright, and the Data API reference documents neither.
-    let content_length = body.as_ref().map_or(0, Vec::len);
-    set_header(&fields, "content-length", &content_length.to_string())?;
-
-    let (trailers_tx, trailers_rx) = bindings::wit_future::new(|| Ok(None));
-    let contents = match body {
-        Some(bytes) => {
-            let (mut tx, rx) = bindings::wit_stream::new();
-            wit_bindgen::spawn_local(async move {
-                tx.write_all(bytes).await;
-                drop(tx);
-                let _ = trailers_tx.write(Ok(None)).await;
-            });
-            Some(rx)
-        }
-        None => {
-            drop(trailers_tx);
-            None
-        }
-    };
-
-    let options = RequestOptions::new();
-    let timeout_ns = u64::from(binding.timeout_ms).saturating_mul(1_000_000);
-    let _ = options.set_connect_timeout(Some(timeout_ns));
-    let _ = options.set_first_byte_timeout(Some(timeout_ns));
-    let _ = options.set_between_bytes_timeout(Some(timeout_ns));
-
-    let (request, _sent) = Request::new(fields, contents, trailers_rx, Some(options));
-    let scheme = if binding.secure {
-        Scheme::Https
-    } else {
-        Scheme::Http
-    };
-    request
-        .set_method(&method)
-        .map_err(|()| DocumentError::Other("wasi:http rejected the request method".to_string()))?;
-    request
-        .set_scheme(Some(&scheme))
-        .map_err(|()| DocumentError::Other("wasi:http rejected the request scheme".to_string()))?;
-    request
-        .set_authority(Some(&binding.authority))
-        .map_err(|()| {
-            DocumentError::InvalidArgument(format!(
-                "`{}` is not a valid host for the configured endpoint",
-                binding.authority
-            ))
-        })?;
-    request.set_path_with_query(Some(path)).map_err(|()| {
-        DocumentError::InvalidArgument(format!("`{path}` is not a valid request path"))
-    })?;
-
-    let response = client::send(request).await.map_err(transport_error)?;
+    let response = send_request(binding, method, path, extra_headers, body).await?;
 
     let status = response.get_status_code();
     // Headers stay valid after `consume_body` moves the response.
@@ -575,7 +486,150 @@ async fn read(binding: &Binding, path: &str) -> Result<DocumentGetResult, Docume
 // document
 // ---------------------------------------------------------------------------
 
-impl DocumentGuest for Component {
+async fn send_request(
+    binding: &Binding,
+    method: Method,
+    path: &str,
+    extra_headers: &[(&str, String)],
+    body: Option<Vec<u8>>,
+) -> Result<Response, DocumentError> {
+    // Cancellation is checked before committing to a round-trip. A capability
+    // call has no host-imposed timeout, so a teardown arriving while calls are
+    // queued returns them immediately rather than waiting out the cluster.
+    if cancel::is_cancelled() {
+        return Err(DocumentError::Other(
+            "invocation was cancelled before the request was sent".to_string(),
+        ));
+    }
+
+    let fields = Fields::new();
+    set_header(&fields, "authorization", &binding.authorization)?;
+    set_header(&fields, "accept", "application/json")?;
+    for (name, value) in extra_headers {
+        set_header(&fields, name, value)?;
+    }
+
+    // Declare the body length up front, including the zero-length case. The
+    // payload is always a complete `Vec<u8>`, but a `wasi:http` request body is
+    // a stream, so without this the transport has no length to advertise and
+    // falls back to `Transfer-Encoding: chunked` on every request — even a
+    // `DELETE` carrying no body at all. Plenty of API gateways and WAFs in
+    // front of a database handle a chunked request body poorly or reject it
+    // outright, and the Data API reference documents neither.
+    let content_length = body.as_ref().map_or(0, Vec::len);
+    set_header(&fields, "content-length", &content_length.to_string())?;
+
+    let (trailers_tx, trailers_rx) = bindings::wit_future::new(|| Ok(None));
+    let contents = match body {
+        Some(bytes) => {
+            let (mut tx, rx) = bindings::wit_stream::new();
+            wit_bindgen::spawn_local(async move {
+                tx.write_all(bytes).await;
+                drop(tx);
+                let _ = trailers_tx.write(Ok(None)).await;
+            });
+            Some(rx)
+        }
+        None => {
+            drop(trailers_tx);
+            None
+        }
+    };
+
+    let options = RequestOptions::new();
+    let timeout_ns = u64::from(binding.timeout_ms).saturating_mul(1_000_000);
+    let _ = options.set_connect_timeout(Some(timeout_ns));
+    let _ = options.set_first_byte_timeout(Some(timeout_ns));
+    let _ = options.set_between_bytes_timeout(Some(timeout_ns));
+
+    let (request, _sent) = Request::new(fields, contents, trailers_rx, Some(options));
+    let scheme = if binding.secure {
+        Scheme::Https
+    } else {
+        Scheme::Http
+    };
+    request
+        .set_method(&method)
+        .map_err(|()| DocumentError::Other("wasi:http rejected the request method".to_string()))?;
+    request
+        .set_scheme(Some(&scheme))
+        .map_err(|()| DocumentError::Other("wasi:http rejected the request scheme".to_string()))?;
+    request
+        .set_authority(Some(&binding.authority))
+        .map_err(|()| {
+            DocumentError::InvalidArgument(format!(
+                "`{}` is not a valid host for the configured endpoint",
+                binding.authority
+            ))
+        })?;
+    request.set_path_with_query(Some(path)).map_err(|()| {
+        DocumentError::InvalidArgument(format!("`{path}` is not a valid request path"))
+    })?;
+
+    client::send(request).await.map_err(transport_error)
+}
+
+impl ReadGuest for Component {
+    async fn get(
+        id: String,
+        options: Option<DocumentGetOptions>,
+    ) -> Result<DocumentGetResult, DocumentError> {
+        let binding = caller_binding()?;
+        if matches!(
+            options.as_ref().and_then(|o| o.use_replica),
+            Some(ReplicaReadLevel::On)
+        ) {
+            // Serving the active copy instead would answer a different
+            // question: a replica read trades freshness for availability, and
+            // this transport cannot make that trade.
+            return Err(DocumentError::Unsupported(
+                "reading from a replica needs a transport that addresses individual nodes; the Data API has no replica endpoint".to_string(),
+            ));
+        }
+
+        let binding = binding.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
+        let mut path = document_path(&binding, &id)?;
+        if let Some(project) = options.as_ref().and_then(|o| o.project.as_ref()) {
+            if !project.is_empty() {
+                // One comma-separated `project`, not a repeated parameter: the
+                // Data API's OpenAPI spec declares it `style: form,
+                // explode: false`. Field names are still escaped, so a name
+                // containing a comma cannot forge a separator.
+                let fields = project
+                    .iter()
+                    .map(|field| api::encode_segment(field))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                path.push_str("?project=");
+                path.push_str(&fields);
+            }
+        }
+        read(&binding, &path).await
+    }
+
+    /// Addressing a replica means addressing a specific node, which the Data
+    /// API does not expose: it is one endpoint in front of the cluster.
+    async fn get_any_replicas(
+        _id: String,
+        _options: Option<DocumentGetAnyReplicaOptions>,
+    ) -> Result<DocumentGetReplicaResult, DocumentError> {
+        Err(DocumentError::Unsupported(
+            "reading from a replica needs a transport that addresses individual nodes; the Data API has no replica endpoint".to_string(),
+        ))
+    }
+
+    /// Not servable over the Data API; see `get-any-replicas`.
+    async fn get_all_replicas(
+        _id: String,
+        _options: Option<DocumentGetAllReplicaOptions>,
+    ) -> Result<Vec<DocumentGetReplicaResult>, DocumentError> {
+        Err(DocumentError::Unsupported(
+            "reading from a replica needs a transport that addresses individual nodes; the Data API has no replica endpoint".to_string(),
+        ))
+    }
+}
+
+impl WriteGuest for Component {
     async fn insert(
         id: String,
         doc: Document,
@@ -652,43 +706,6 @@ impl DocumentGuest for Component {
             Some(doc),
         )
         .await
-    }
-
-    async fn get(
-        id: String,
-        options: Option<DocumentGetOptions>,
-    ) -> Result<DocumentGetResult, DocumentError> {
-        let binding = caller_binding()?;
-        if matches!(
-            options.as_ref().and_then(|o| o.use_replica),
-            Some(ReplicaReadLevel::On)
-        ) {
-            // Serving the active copy instead would answer a different
-            // question: a replica read trades freshness for availability, and
-            // this transport cannot make that trade.
-            return Err(DocumentError::Unsupported(
-                "reading from a replica needs a transport that addresses individual nodes; the Data API has no replica endpoint".to_string(),
-            ));
-        }
-
-        let binding = binding.with_timeout_ns(options.as_ref().and_then(|o| o.timeout_ns));
-        let mut path = document_path(&binding, &id)?;
-        if let Some(project) = options.as_ref().and_then(|o| o.project.as_ref()) {
-            if !project.is_empty() {
-                // One comma-separated `project`, not a repeated parameter: the
-                // Data API's OpenAPI spec declares it `style: form,
-                // explode: false`. Field names are still escaped, so a name
-                // containing a comma cannot forge a separator.
-                let fields = project
-                    .iter()
-                    .map(|field| api::encode_segment(field))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                path.push_str("?project=");
-                path.push_str(&fields);
-            }
-        }
-        read(&binding, &path).await
     }
 
     async fn remove(
@@ -787,27 +804,6 @@ impl DocumentGuest for Component {
         Ok(())
     }
 
-    /// Addressing a replica means addressing a specific node, which the Data
-    /// API does not expose: it is one endpoint in front of the cluster.
-    async fn get_any_replicas(
-        _id: String,
-        _options: Option<DocumentGetAnyReplicaOptions>,
-    ) -> Result<DocumentGetReplicaResult, DocumentError> {
-        Err(DocumentError::Unsupported(
-            "reading from a replica needs a transport that addresses individual nodes; the Data API has no replica endpoint".to_string(),
-        ))
-    }
-
-    /// Not servable over the Data API; see `get-any-replicas`.
-    async fn get_all_replicas(
-        _id: String,
-        _options: Option<DocumentGetAllReplicaOptions>,
-    ) -> Result<Vec<DocumentGetReplicaResult>, DocumentError> {
-        Err(DocumentError::Unsupported(
-            "reading from a replica needs a transport that addresses individual nodes; the Data API has no replica endpoint".to_string(),
-        ))
-    }
-
     async fn touch(
         id: String,
         options: Option<DocumentTouchOptions>,
@@ -860,7 +856,6 @@ impl DocumentGuest for Component {
         })
     }
 }
-
 /// The touch endpoint's body: an absolute ISO 8601 instant, plus whether to
 /// send the value back.
 fn touch_body(expires_in_ns: u64, return_content: bool) -> Result<Vec<u8>, DocumentError> {
@@ -888,24 +883,18 @@ fn touch_body(expires_in_ns: u64, return_content: bool) -> Result<Vec<u8>, Docum
 // sqlpp
 // ---------------------------------------------------------------------------
 
-/// The Query Service response envelope.
-#[derive(serde::Deserialize)]
-struct QueryBody {
-    #[serde(default)]
-    results: Vec<serde_json::Value>,
-    #[serde(default)]
-    errors: Vec<serde_json::Value>,
-}
-
 impl SqlppGuest for Component {
+    type QueryCompletion = crate::query_stream::Completion;
     async fn query(
         query: String,
         params: Vec<SqlppValue>,
         options: Option<SqlppQueryOptions>,
-    ) -> Result<SqlppValue, SqlppQueryError> {
+    ) -> Result<QueryResult, SqlppQueryError> {
         let binding = caller_binding()
             .map_err(document_error_as_query_error)?
             .with_timeout_ns(options.as_ref().map(|o| o.timeout_ns));
+        let deadline =
+            monotonic_clock::now().saturating_add(u64::from(binding.timeout_ms) * 1_000_000);
 
         let mut request = serde_json::Map::new();
         request.insert("statement".to_string(), query.into());
@@ -1012,36 +1001,20 @@ impl SqlppGuest for Component {
         let path = format!("{}/_p/query/query/service", binding.base_path);
         let payload = serde_json::Value::Object(request).to_string().into_bytes();
 
-        // The effective binding timeout bounds both the query and transport.
-        let reply = send(
-            &binding,
-            Method::Post,
-            &path,
-            &[("content-type", "application/json".to_string())],
-            Some(payload),
+        let response = transport::within(
+            send_request(
+                &binding,
+                Method::Post,
+                &path,
+                &[("content-type", "application/json".to_string())],
+                Some(payload),
+            ),
+            monotonic_clock::wait_until(deadline),
         )
         .await
+        .unwrap_or(Err(DocumentError::Timeout))
         .map_err(document_error_as_query_error)?;
-
-        if !reply.ok() {
-            return Err(to_query_error(api::classify(reply.status, &reply.body)));
-        }
-
-        let parsed: QueryBody = serde_json::from_slice(&reply.body).map_err(|e| {
-            SqlppQueryError::Unexpected(format!(
-                "the Query Service response was not the expected JSON object: {e}"
-            ))
-        })?;
-
-        // A 200 can still carry statement-level errors in the envelope; surface
-        // them rather than returning an empty, apparently-successful result.
-        if !parsed.errors.is_empty() {
-            return Err(to_query_error(api::classify(200, &reply.body)));
-        }
-
-        Ok(SqlppValue::Json(
-            serde_json::Value::Array(parsed.results).to_string(),
-        ))
+        Ok(crate::query_stream::start(response, deadline))
     }
 }
 
