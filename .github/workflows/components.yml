@@ -36,6 +36,7 @@ jobs:
       - name: Test verification runners
         run: |
           node --check tests/verify-components.mjs
+          node --check tests/component-build.mjs
           node --check tests/fixtures/server.js
           node --check host-plugins/component/tls-client/verification/run.mjs
           node --input-type=module -e "await import('./tests/verify-components.mjs'); await import('./host-plugins/component/tls-client/verification/run.mjs')"

@@ -83,8 +83,6 @@ for the native host's TLS dependencies. Run from this directory:
 # Stop at the first failed command without changing the calling shell's options.
 (
 set -eu
-wash build
-(cd verification/caller && wash build)
 cargo test --locked
 
 # Use a fresh checkout so the compatibility patch has a known base.
@@ -93,11 +91,14 @@ git clone https://github.com/wasmCloud/wasmCloud.git "$TLS_RUNTIME_DIR"
 git -C "$TLS_RUNTIME_DIR" checkout 86e98479cf8336f563e68f66d6ee6c0b8924b2c9
 git -C "$TLS_RUNTIME_DIR" apply --check "$PWD/verification/runtime.patch"
 git -C "$TLS_RUNTIME_DIR" apply "$PWD/verification/runtime.patch"
-node verification/run.mjs --runtime-source "$TLS_RUNTIME_DIR" --skip-build
+node verification/run.mjs --runtime-source "$TLS_RUNTIME_DIR"
 )
 ```
 
 `verification/run.mjs` builds both components unless `--skip-build` is supplied.
+Component builds explicitly use each project's local `target` directory,
+overriding inherited environment settings and Cargo's `build.target-dir` configuration.
+The native harness still uses the cache selected by `--target-dir`.
 It creates a temporary native harness, starts real component-plugin and caller
 stores, and uses local TLS peers on dynamically allocated ports. No Docker,
 database, public endpoint, or real credentials are required.
