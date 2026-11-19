@@ -29,10 +29,11 @@ world couchbase-wasi-sockets-p3-plugin {
     /// Per-workload configuration, validated at deploy time.
     export wasmcloud:host/workload-lifecycle@0.1.6;
 
-    export wasmcloud:couchbase/types@0.2.0;
-    export wasmcloud:couchbase/sqlpp-types@0.2.0;
-    export wasmcloud:couchbase/document@0.2.0;
-    export wasmcloud:couchbase/sqlpp@0.2.0;
+    export wasmcloud:couchbase/types@0.3.0;
+    export wasmcloud:couchbase/sqlpp-types@0.3.0;
+    export wasmcloud:couchbase/document-read@0.3.0;
+    export wasmcloud:couchbase/document-write@0.3.0;
+    export wasmcloud:couchbase/sqlpp@0.3.0;
 }
 
 /// The KV plugin with verified TLS, for hosts with wasi-tls enabled.

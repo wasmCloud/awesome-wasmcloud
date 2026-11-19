@@ -11,6 +11,7 @@ name = "couchbase_wasi_sockets_p3_plugin"
 [dependencies]
 wit-bindgen = { version = "0.63.0", features = ["async-spawn", "inter-task-wakeup"] }
 serde_json = "1.0"
+serde = "1.0"
 
 [features]
 # The TLS draft requires a host release containing wasmCloud PR #6014.

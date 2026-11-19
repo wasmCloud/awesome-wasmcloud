@@ -11,7 +11,7 @@ import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { buildComponents } from './component-build.mjs';
+import { buildComponents, buildComponentFeature } from './component-build.mjs';
 
 export { buildComponents };
 
@@ -27,7 +27,7 @@ function run(command, args, options = {}) {
   return execFileSync(command, args, { encoding: 'utf8', timeout: 180_000, ...options })?.trim() ?? '';
 }
 
-function request(port, path, { method = 'POST', body = Buffer.alloc(0), headers = {} } = {}) {
+function request(port, path, { method = 'POST', body = Buffer.alloc(0), headers = {}, timeoutMs = 10_000 } = {}) {
   return new Promise((resolveRequest, reject) => {
     const requestHeaders = { ...headers };
     if (!Object.keys(headers).some(name => ['content-length', 'transfer-encoding'].includes(name.toLowerCase()))) {
@@ -44,9 +44,37 @@ function request(port, path, { method = 'POST', body = Buffer.alloc(0), headers 
       response.on('end', () => resolveRequest({ status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks) }));
       response.on('error', reject);
     });
-    outgoing.setTimeout(10_000, () => outgoing.destroy(new Error('test HTTP request timed out')));
+    outgoing.setTimeout(timeoutMs, () => outgoing.destroy(new Error('test HTTP request timed out')));
     outgoing.on('error', reject);
     outgoing.end(body);
+  });
+}
+
+// The peer withholds its final row until the caller receives the first one.
+// A buffered query implementation cannot release this gate and fails the test.
+function incrementalQuery(port, monitor) {
+  return new Promise((resolveQuery, reject) => {
+    let body = '';
+    let released = false;
+    const outgoing = http.get({ host: '127.0.0.1', port, path: '/query-stream-incremental' }, response => {
+      response.setEncoding('utf8');
+      response.on('data', chunk => {
+        body += chunk;
+        if (body.length > 4096) { outgoing.destroy(new Error('incremental test reply exceeds 4 KiB')); return; }
+        if (!released && body.includes('ROW 1')) {
+          released = true;
+          void request(monitor, '/release-query', { method: 'POST' }).catch(error => outgoing.destroy(error));
+        }
+      });
+      response.on('error', reject);
+      response.on('end', () => {
+        if (released && body.includes('ROW 2') && body.includes('QUERY STREAM OK rows=2')) resolveQuery();
+        else reject(new Error('incremental query did not complete: ' + body));
+      });
+    });
+    const deadline = setTimeout(() => outgoing.destroy(new Error('first row did not release the query gate')), 5000);
+    outgoing.once('close', () => clearTimeout(deadline));
+    outgoing.on('error', reject);
   });
 }
 
@@ -297,8 +325,8 @@ async function verifyCouchbase(fixture, sockets) {
   copyFileSync(join(sockets ? KV : CB, 'target/wasm32-wasip2/release', filename), stage);
   const dev = { host_plugins: [{ id: plugin, file: `/fixture/${plugin}.wasm`,
     allowedHosts: ['backend:11210', 'backend:18009'], allowedIpNameLookups: ['*'] }],
-  host_interfaces: [{ namespace: 'wasmcloud', package: 'couchbase', version: '0.2.0',
-    interfaces: ['types', 'sqlpp-types', 'document', 'sqlpp'], config: {
+  host_interfaces: [{ namespace: 'wasmcloud', package: 'couchbase', version: '0.3.0',
+    interfaces: ['types', 'sqlpp-types', 'document-read', 'document-write', 'sqlpp'], config: {
       endpoint: sockets ? 'couchbase://backend' : 'http://backend:18009', 'query-port': '18009',
       bucket: 'test.bucket', username: 'synthetic', password: 'synthetic', 'timeout-ms': '100',
     } }] };
@@ -333,7 +361,43 @@ async function verifyCouchbase(fixture, sockets) {
     const healthy = await request(port, '/query-context', { method: 'GET' });
     assert(healthy.body.includes('QUERY OK'), healthy.body.toString());
   });
-  const count = cases.length + limits.length;
+  dev.host_interfaces[0].config['timeout-ms'] = '15000';
+  await fixture.host(PROBE, artifact, options, async port => {
+    const large = await request(port, '/query-stream-large', { method: 'GET', timeoutMs: 20_000 });
+    assert(large.body.includes('QUERY STREAM OK rows=600 bytes=39321600'), large.body.toString());
+    await incrementalQuery(port, fixture.monitor);
+    for (const [path, expected] of [
+      ['query-stream-late-error', '::Timeout'], ['query-stream-malformed', '::Unexpected'],
+      ['query-stream-truncated', '::RequestFailed'],
+    ]) {
+      const response = await request(port, '/' + path, { method: 'GET' });
+      assert(response.body.includes('QUERY STREAM ERROR rows=1') && response.body.includes(expected), response.body.toString());
+    }
+    const cancelled = await request(port, '/query-stream-cancel', { method: 'GET' });
+    assert(cancelled.body.includes('QUERY CANCELLED after one row'), cancelled.body.toString());
+    let closed = false;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      closed = (await fixture.requests()).some(entry => entry.kind === 'query-stream-closed' && entry.mode.includes('cancel'));
+      if (closed) break;
+      await delay(50);
+    }
+    assert(closed, 'dropping query completion did not close the upstream response');
+  });
+  dev.host_interfaces[0].config['timeout-ms'] = '100';
+  await fixture.host(PROBE, artifact, options, async port => {
+    const response = await request(port, '/query-stream-backpressure', { method: 'GET' });
+    assert(response.body.includes('::Timeout'), response.body.toString());
+    const healthy = await request(port, '/query-context', { method: 'GET' });
+    assert(healthy.body.includes('QUERY OK'), healthy.body.toString());
+  });
+  const readerDev = structuredClone(dev);
+  readerDev.host_interfaces[0].interfaces = ['types', 'document-read'];
+  await fixture.host(PROBE, 'target/read-only/wasm32-wasip2/release/component_fault_probe.wasm',
+    { ...options, dev: readerDev }, async port => {
+      const response = await request(port, sockets ? '/expiry-none' : '/complete', { method: 'GET' });
+      assert(response.body.includes('READ OK'), response.body.toString());
+    });
+  const count = cases.length + limits.length + 9;
   console.log(`${plugin}: ${count} checks passed`);
   return count;
 }
@@ -347,6 +411,7 @@ async function main() {
   }
   if (!values['skip-build']) {
     buildComponents([GRPC, CB, KV, PROBE]);
+    buildComponentFeature(PROBE, 'read-only');
   }
   const directory = mkdtempSync(join(tmpdir(), 'component-check-'));
   const fixture = new Fixture(directory, values['host-image']);

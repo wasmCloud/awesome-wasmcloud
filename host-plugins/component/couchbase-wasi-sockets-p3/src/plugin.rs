@@ -17,20 +17,24 @@ use crate::conn::Connection;
 use crate::lifecycle::State;
 use crate::proto::{self, op, status};
 use crate::query;
+use crate::query_stream::transport_error as query_transport_error;
 use crate::transport;
 
-use bindings::exports::wasmcloud::couchbase::document::{
-    DocumentGetAllReplicaOptions, DocumentGetAndLockOptions, DocumentGetAndTouchOptions,
-    DocumentGetAnyReplicaOptions, DocumentGetOptions, DocumentGetReplicaResult, DocumentGetResult,
-    DocumentInsertOptions, DocumentRemoveOptions, DocumentReplaceOptions, DocumentTouchOptions,
-    DocumentUnlockOptions, DocumentUpsertOptions, Guest as DocumentGuest,
-};
 use bindings::exports::wasmcloud::couchbase::sqlpp::{
-    Guest as SqlppGuest, SqlppQueryOptions, SqlppValue,
+    Guest as SqlppGuest, QueryResult, SqlppQueryOptions, SqlppValue,
 };
 use bindings::exports::wasmcloud::couchbase::sqlpp_types::SqlppQueryError;
 use bindings::exports::wasmcloud::couchbase::types::{
     DocumentError, DurabilityLevel, MutationMetadata, ReplicaReadLevel, Time,
+};
+use bindings::exports::wasmcloud::couchbase::types::{
+    DocumentGetAllReplicaOptions, DocumentGetAndLockOptions, DocumentGetAndTouchOptions,
+    DocumentGetAnyReplicaOptions, DocumentGetOptions, DocumentGetReplicaResult, DocumentGetResult,
+    DocumentInsertOptions, DocumentRemoveOptions, DocumentReplaceOptions, DocumentTouchOptions,
+    DocumentUnlockOptions, DocumentUpsertOptions,
+};
+use bindings::exports::wasmcloud::couchbase::{
+    document_read::Guest as ReadGuest, document_write::Guest as WriteGuest,
 };
 use bindings::exports::wasmcloud::host::workload_lifecycle::{
     Guest as LifecycleGuest, InterfaceBinding, WorkloadInfo,
@@ -112,6 +116,12 @@ async fn prepare_bind(
         let mut config = iface.config.clone();
         config.extend(binding_config_secrets(iface).await.map_err(refuse)?);
         let binding = Binding::from_config(&config).map_err(refuse)?;
+        if bound
+            .iter()
+            .any(|(name, existing)| name == &iface.name && existing != &binding)
+        {
+            return Err("conflicting Couchbase configuration for one binding; use one shared config or distinct named imports".into());
+        }
         bound.push((iface.name.clone(), binding));
     }
 
@@ -495,7 +505,52 @@ async fn read(
     .await
 }
 
-impl DocumentGuest for Component {
+impl ReadGuest for Component {
+    async fn get(
+        id: String,
+        options: Option<DocumentGetOptions>,
+    ) -> Result<DocumentGetResult, DocumentError> {
+        reject_replica(options.as_ref().and_then(|o| o.use_replica))?;
+        let paths: Vec<String> = options
+            .as_ref()
+            .and_then(|o| o.project.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        let with_expiry = options.as_ref().is_some_and(|o| o.with_expiry);
+        read(
+            op::GET,
+            id,
+            Vec::new(),
+            paths,
+            with_expiry,
+            options.and_then(|o| o.timeout_ns),
+        )
+        .await
+    }
+
+    /// Reading a replica needs the vbucket-to-node map and a connection per
+    /// node, neither of which this implementation keeps.
+    async fn get_any_replicas(
+        _id: String,
+        _options: Option<DocumentGetAnyReplicaOptions>,
+    ) -> Result<DocumentGetReplicaResult, DocumentError> {
+        Err(DocumentError::Unsupported(
+            "this plugin connects to one node and does not track the replica topology".to_string(),
+        ))
+    }
+
+    /// Not served; see `get-any-replicas`.
+    async fn get_all_replicas(
+        _id: String,
+        _options: Option<DocumentGetAllReplicaOptions>,
+    ) -> Result<Vec<DocumentGetReplicaResult>, DocumentError> {
+        Err(DocumentError::Unsupported(
+            "this plugin connects to one node and does not track the replica topology".to_string(),
+        ))
+    }
+}
+
+impl WriteGuest for Component {
     async fn insert(
         id: String,
         document: Vec<u8>,
@@ -562,28 +617,6 @@ impl DocumentGuest for Component {
             flags,
             expires,
             cas,
-            options.and_then(|o| o.timeout_ns),
-        )
-        .await
-    }
-
-    async fn get(
-        id: String,
-        options: Option<DocumentGetOptions>,
-    ) -> Result<DocumentGetResult, DocumentError> {
-        reject_replica(options.as_ref().and_then(|o| o.use_replica))?;
-        let paths: Vec<String> = options
-            .as_ref()
-            .and_then(|o| o.project.as_ref())
-            .cloned()
-            .unwrap_or_default();
-        let with_expiry = options.as_ref().is_some_and(|o| o.with_expiry);
-        read(
-            op::GET,
-            id,
-            Vec::new(),
-            paths,
-            with_expiry,
             options.and_then(|o| o.timeout_ns),
         )
         .await
@@ -714,62 +747,31 @@ impl DocumentGuest for Component {
         })
         .await
     }
-
-    /// Reading a replica needs the vbucket-to-node map and a connection per
-    /// node, neither of which this implementation keeps.
-    async fn get_any_replicas(
-        _id: String,
-        _options: Option<DocumentGetAnyReplicaOptions>,
-    ) -> Result<DocumentGetReplicaResult, DocumentError> {
-        Err(DocumentError::Unsupported(
-            "this plugin connects to one node and does not track the replica topology".to_string(),
-        ))
-    }
-
-    /// Not served; see `get-any-replicas`.
-    async fn get_all_replicas(
-        _id: String,
-        _options: Option<DocumentGetAllReplicaOptions>,
-    ) -> Result<Vec<DocumentGetReplicaResult>, DocumentError> {
-        Err(DocumentError::Unsupported(
-            "this plugin connects to one node and does not track the replica topology".to_string(),
-        ))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// sqlpp
-// ---------------------------------------------------------------------------
+} // ---------------------------------------------------------------------------
+  // sqlpp
+  // ---------------------------------------------------------------------------
 
 /// SQL++ is an HTTP service, not a KV one, so it goes out over `wasi:http`
 /// rather than this plugin's socket.
 async fn query_service(
     binding: &Binding,
     body: Vec<u8>,
-) -> Result<(u16, Vec<u8>), SqlppQueryError> {
-    within(binding.timeout_ms, query_service_inner(binding, body))
-        .await
-        .unwrap_or(Err(SqlppQueryError::Timeout))
-}
-
-fn query_transport_error(error: bindings::wasi::http::types::ErrorCode) -> SqlppQueryError {
-    use bindings::wasi::http::types::ErrorCode;
-    match error {
-        ErrorCode::DnsTimeout
-        | ErrorCode::ConnectionTimeout
-        | ErrorCode::ConnectionReadTimeout
-        | ErrorCode::ConnectionWriteTimeout
-        | ErrorCode::HttpResponseTimeout => SqlppQueryError::Timeout,
-        other => SqlppQueryError::RequestFailed(format!("{other:?}")),
-    }
+    deadline: u64,
+) -> Result<bindings::wasi::http::types::Response, SqlppQueryError> {
+    transport::within(
+        query_service_inner(binding, body),
+        monotonic_clock::wait_until(deadline),
+    )
+    .await
+    .unwrap_or(Err(SqlppQueryError::Timeout))
 }
 
 async fn query_service_inner(
     binding: &Binding,
     body: Vec<u8>,
-) -> Result<(u16, Vec<u8>), SqlppQueryError> {
+) -> Result<bindings::wasi::http::types::Response, SqlppQueryError> {
     use bindings::wasi::http::client;
-    use bindings::wasi::http::types::{Fields, Method, Request, RequestOptions, Response, Scheme};
+    use bindings::wasi::http::types::{Fields, Method, Request, RequestOptions, Scheme};
 
     let fields = Fields::new();
     let credentials = base64(format!("{}:{}", binding.username, binding.password).as_bytes());
@@ -806,27 +808,7 @@ async fn query_service_inner(
     let _ = request.set_authority(Some(&binding.query_authority()));
     let _ = request.set_path_with_query(Some("/query/service"));
 
-    let response = client::send(request).await.map_err(query_transport_error)?;
-    let status = response.get_status_code();
-    let (res_tx, res_rx) = bindings::wit_future::new(|| Ok(()));
-    let (mut stream, trailers) = Response::consume_body(response, res_rx);
-    let received = transport::receive_body(
-        async move {
-            let received = transport::read_bounded(
-                async |capacity| stream.read(Vec::with_capacity(capacity)).await.1,
-                transport::MAX_HTTP_BODY_BYTES,
-            )
-            .await
-            .map_err(|_| {
-                SqlppQueryError::RequestFailed("HTTP response exceeds the 32 MiB body limit".into())
-            })?;
-            drop(res_tx);
-            Ok(received)
-        },
-        async move { trailers.await.map_err(query_transport_error) },
-    )
-    .await?;
-    Ok((status, received))
+    client::send(request).await.map_err(query_transport_error)
 }
 
 /// Standard base64, for the Basic credential.
@@ -857,16 +839,19 @@ fn base64(input: &[u8]) -> String {
 }
 
 impl SqlppGuest for Component {
+    type QueryCompletion = crate::query_stream::Completion;
     async fn query(
         query: String,
         params: Vec<SqlppValue>,
         options: Option<SqlppQueryOptions>,
-    ) -> Result<SqlppValue, SqlppQueryError> {
+    ) -> Result<QueryResult, SqlppQueryError> {
         let binding = caller_binding().map_err(|e| match e {
             DocumentError::NotConfigured(m) => SqlppQueryError::NotConfigured(m),
             other => SqlppQueryError::Unexpected(format!("{other:?}")),
         })?;
         let binding = binding.with_timeout_ns(options.as_ref().map(|o| o.timeout_ns));
+        let deadline =
+            monotonic_clock::now().saturating_add(u64::from(binding.timeout_ms) * 1_000_000);
 
         let mut args = Vec::with_capacity(params.len());
         for (index, param) in params.iter().enumerate() {
@@ -942,15 +927,8 @@ impl SqlppGuest for Component {
         }
         let body = serde_json::Value::Object(request).to_string().into_bytes();
 
-        let (status, payload) = query_service(&binding, body).await?;
-        let rows = query::parse_response(status, &payload).map_err(|error| match error {
-            query::Failure::InvalidArgument(message) => SqlppQueryError::InvalidArgument(message),
-            query::Failure::Unauthorized => SqlppQueryError::Unauthorized,
-            query::Failure::Timeout => SqlppQueryError::Timeout,
-            query::Failure::Server(message) => SqlppQueryError::Server(message),
-            query::Failure::Unexpected(message) => SqlppQueryError::Unexpected(message),
-        })?;
-        Ok(SqlppValue::Json(rows.to_string()))
+        let response = query_service(&binding, body, deadline).await?;
+        Ok(crate::query_stream::start(response, deadline))
     }
 }
 

@@ -13,3 +13,11 @@ export function buildComponents(projects, environment = process.env) {
     });
   }
 }
+
+export function buildComponentFeature(project, feature, environment = process.env) {
+  if (!/^[a-z0-9][a-z0-9_-]*$/.test(feature)) throw new Error('invalid component feature');
+  const options = { cwd: project, env: environment, stdio: 'inherit', timeout: 180_000 };
+  execFileSync('wash', ['wit', 'fetch'], options);
+  execFileSync('cargo', ['build', '--locked', '--target', 'wasm32-wasip2', '--release',
+    '--features', feature, '--target-dir', resolve(project, 'target', feature)], options);
+}

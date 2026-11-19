@@ -1,13 +1,21 @@
 mod bindings {
+    #[cfg(not(feature = "read-only"))]
     wit_bindgen::generate!({ world: "component-fault-probe", generate_all });
+    #[cfg(feature = "read-only")]
+    wit_bindgen::generate!({ world: "couchbase-read-only", generate_all });
 }
 
 use bindings::exports::wasi::http::handler::Guest;
 use bindings::wasi::http::types::{ErrorCode, Fields, Request, Response};
-use bindings::wasmcloud::couchbase::{document, sqlpp};
+#[cfg(not(feature = "read-only"))]
+use bindings::wasmcloud::couchbase::{document_read as read, document_write as write};
+#[cfg(not(feature = "read-only"))]
+#[path = "../../query-consumer.rs"]
+mod query_consumer;
 
 struct Probe;
 
+#[cfg(not(feature = "read-only"))]
 impl Guest for Probe {
     async fn handle(request: Request) -> Result<Response, ErrorCode> {
         let id = request
@@ -15,11 +23,14 @@ impl Guest for Probe {
             .unwrap_or_default()
             .trim_start_matches('/')
             .to_string();
+        if id.starts_with("query-stream-") {
+            return stream_query(&id).await;
+        }
         let body = if id.starts_with("large-") && id.ends_with("-ttl") {
             use bindings::wasmcloud::couchbase::types::DurabilityLevel;
-            use document::*;
+            use bindings::wasmcloud::couchbase::types::*;
             let result = match id.as_str() {
-                "large-touch-ttl" => touch(
+                "large-touch-ttl" => write::touch(
                     "range-probe".into(),
                     Some(DocumentTouchOptions {
                         expires_in: u64::MAX,
@@ -30,7 +41,7 @@ impl Guest for Probe {
                 )
                 .await
                 .map(|_| ()),
-                "large-get-touch-ttl" => get_and_touch(
+                "large-get-touch-ttl" => write::get_and_touch(
                     "range-probe".into(),
                     Some(DocumentGetAndTouchOptions {
                         expires_in: u64::MAX,
@@ -41,7 +52,7 @@ impl Guest for Probe {
                 )
                 .await
                 .map(|_| ()),
-                "large-insert-ttl" => insert(
+                "large-insert-ttl" => write::insert(
                     "range-probe".into(),
                     b"{}".to_vec(),
                     Some(DocumentInsertOptions {
@@ -57,7 +68,7 @@ impl Guest for Probe {
                 )
                 .await
                 .map(|_| ()),
-                "large-replace-ttl" => replace(
+                "large-replace-ttl" => write::replace(
                     "range-probe".into(),
                     b"{}".to_vec(),
                     Some(DocumentReplaceOptions {
@@ -75,7 +86,7 @@ impl Guest for Probe {
                 )
                 .await
                 .map(|_| ()),
-                _ => upsert(
+                _ => write::upsert(
                     "range-probe".into(),
                     b"{}".to_vec(),
                     Some(DocumentUpsertOptions {
@@ -95,16 +106,16 @@ impl Guest for Probe {
             };
             format!("TTL {result:?}")
         } else if id == "dot-lock-id" {
-            format!("LOCK {:?}", document::get_and_lock("..".into(), None).await)
+            format!("LOCK {:?}", write::get_and_lock("..".into(), None).await)
         } else if id == "dot-remove-id" {
-            format!("REMOVE {:?}", document::remove(".".into(), None).await)
+            format!("REMOVE {:?}", write::remove(".".into(), None).await)
         } else if id == "oversized-id" || id == "empty-id" {
             let key = if id == "empty-id" {
                 String::new()
             } else {
                 "x".repeat(65_537)
             };
-            match document::upsert(key, b"{}".to_vec(), None).await {
+            match write::upsert(key, b"{}".to_vec(), None).await {
                 Ok(_) => "WRITE OK".to_string(),
                 Err(error) => format!("WRITE ERROR {error:?}"),
             }
@@ -116,12 +127,12 @@ impl Guest for Probe {
                 "query-oversized" => "SELECT RAW \"query-oversized\"",
                 _ => "SELECT RAW 1",
             };
-            match sqlpp::query(statement.into(), vec![], None).await {
+            match query_consumer::query(statement.into(), vec![], None).await {
                 Ok(value) => format!("QUERY OK {value:?}"),
                 Err(error) => format!("QUERY ERROR {error:?}"),
             }
         } else {
-            let options = document::DocumentGetOptions {
+            let options = bindings::wasmcloud::couchbase::types::DocumentGetOptions {
                 with_expiry: id.starts_with("expiry-"),
                 project: None,
                 use_replica: None,
@@ -134,7 +145,7 @@ impl Guest for Probe {
                 "dotdot-id" => "..",
                 _ => &id,
             };
-            match document::get(key.into(), Some(options)).await {
+            match read::get(key.into(), Some(options)).await {
                 Ok(value) => format!(
                     "OK cas={} expiry={:?} document={}",
                     value.cas,
@@ -158,3 +169,93 @@ impl Guest for Probe {
 }
 
 bindings::export!(Probe with_types_in bindings);
+
+#[cfg(feature = "read-only")]
+impl Guest for Probe {
+    async fn handle(request: Request) -> Result<Response, ErrorCode> {
+        let id = request
+            .get_path_with_query()
+            .unwrap_or_default()
+            .trim_start_matches('/')
+            .to_string();
+        let result = bindings::wasmcloud::couchbase::document_read::get(id, None).await;
+        let text = match result {
+            Ok(document) => format!(
+                "READ OK cas={} bytes={}",
+                document.cas,
+                document.document.len()
+            ),
+            Err(error) => format!("READ ERROR {error:?}"),
+        };
+        text_response(text)
+    }
+}
+
+fn text_response(text: String) -> Result<Response, ErrorCode> {
+    let (mut writer, reader) = bindings::wit_stream::new();
+    let (trailers_tx, trailers_rx) = bindings::wit_future::new(|| Ok(None));
+    wit_bindgen::spawn_local(async move {
+        writer.write_all(text.into_bytes()).await;
+        drop(writer);
+        let _ = trailers_tx.write(Ok(None)).await;
+    });
+    let (response, _) = Response::new(Fields::new(), Some(reader), trailers_rx);
+    Ok(response)
+}
+
+#[cfg(not(feature = "read-only"))]
+async fn stream_query(mode: &str) -> Result<Response, ErrorCode> {
+    use bindings::wasmcloud::couchbase::sqlpp::{self, QueryCompletion};
+    let result = match sqlpp::query(format!("SELECT RAW \"{mode}\""), vec![], None).await {
+        Ok(result) => result,
+        Err(error) => return text_response(format!("QUERY ERROR {error:?}")),
+    };
+    let mode = mode.to_string();
+    let (mut writer, reader) = bindings::wit_stream::new();
+    let (trailers_tx, trailers_rx) = bindings::wit_future::new(|| Ok(None));
+    wit_bindgen::spawn_local(async move {
+        if mode.ends_with("backpressure") {
+            bindings::wasi::clocks::monotonic_clock::wait_for(300_000_000).await;
+        }
+        let mut rows = result.rows;
+        let mut count = 0;
+        let mut bytes = 0;
+        loop {
+            let (_, chunk) = rows.read(Vec::with_capacity(1)).await;
+            if chunk.is_empty() {
+                break;
+            }
+            for row in chunk {
+                count += 1;
+                bytes += row.len();
+                if mode.ends_with("cancel") {
+                    drop(result.completion);
+                    drop(rows);
+                    writer
+                        .write_all(b"QUERY CANCELLED after one row".to_vec())
+                        .await;
+                    drop(writer);
+                    let _ = trailers_tx.write(Ok(None)).await;
+                    return;
+                }
+                if mode.ends_with("incremental")
+                    && !writer
+                        .write_all(format!("ROW {row}\n").into_bytes())
+                        .await
+                        .is_empty()
+                {
+                    return;
+                }
+            }
+        }
+        let message = match QueryCompletion::finish(result.completion).await {
+            Ok(()) => format!("QUERY STREAM OK rows={count} bytes={bytes}"),
+            Err(error) => format!("QUERY STREAM ERROR rows={count} {error:?}"),
+        };
+        writer.write_all(message.into_bytes()).await;
+        drop(writer);
+        let _ = trailers_tx.write(Ok(None)).await;
+    });
+    let (response, _) = Response::new(Fields::new(), Some(reader), trailers_rx);
+    Ok(response)
+}

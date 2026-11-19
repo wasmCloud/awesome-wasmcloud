@@ -44,8 +44,9 @@ world couchbase-plugin {
     /// The capability itself: the asynchronous successor to the published
     /// `wasmcloud:couchbase@0.1.0-draft`, whose synchronous functions cannot be
     /// served across a plugin's store boundary.
-    export wasmcloud:couchbase/types@0.2.0;
-    export wasmcloud:couchbase/sqlpp-types@0.2.0;
-    export wasmcloud:couchbase/document@0.2.0;
-    export wasmcloud:couchbase/sqlpp@0.2.0;
+    export wasmcloud:couchbase/types@0.3.0;
+    export wasmcloud:couchbase/sqlpp-types@0.3.0;
+    export wasmcloud:couchbase/document-read@0.3.0;
+    export wasmcloud:couchbase/document-write@0.3.0;
+    export wasmcloud:couchbase/sqlpp@0.3.0;
 }

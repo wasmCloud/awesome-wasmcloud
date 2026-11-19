@@ -5,12 +5,13 @@ const net = require('node:net');
 const fs = require('node:fs');
 const { once } = require('node:events');
 const requests = [];
+const queryGates = new Set();
 const frame = value => {
   const data = Buffer.from(value); const header = Buffer.alloc(5);
   header.writeUInt32BE(data.length, 1); return Buffer.concat([header, data]);
 };
 // Respect backpressure and stop allocating/writing as soon as the client aborts.
-async function writeChunks(output, chunk, count) {
+async function writeChunks(output, chunk, count, ending) {
   const controller = new AbortController();
   const closed = () => controller.abort();
   output.once('close', closed);
@@ -20,7 +21,7 @@ async function writeChunks(output, chunk, count) {
         await once(output, 'drain', { signal: controller.signal });
       }
     }
-    if (!output.destroyed) output.end();
+    if (!output.destroyed) output.end(ending);
   } catch { /* Oversized replies are expected to be cancelled by the client. */ }
   finally { output.removeListener('close', closed); }
 }
@@ -73,6 +74,11 @@ http2.createServer().on('stream', grpc).listen(18098, '0.0.0.0');
 http2.createSecureServer({key: fs.readFileSync('/fixture/server.key'),
   cert: fs.readFileSync('/fixture/server.crt')}).on('stream', grpc).listen(18443, '0.0.0.0');
 http.createServer((req, res) => {
+  if (req.url === '/release-query') {
+    for (const release of queryGates) release();
+    queryGates.clear();
+    res.end('released'); return;
+  }
   res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(requests));
 }).listen(18099, '0.0.0.0');
 
@@ -83,11 +89,39 @@ http.createServer((req, res) => {
     let body = ''; req.on('data', chunk => {body += chunk;});
     req.on('end', () => {
       const data = JSON.parse(body || '{}');
-      if (data.statement === 'SELECT RAW "query-context"') {
+      if (data.statement === 'SELECT RAW "query-stream-large"') {
+        const row = '"' + 'x'.repeat(65534) + '"';
+        res.write('{"results":[');
+        void writeChunks(res, Buffer.from(row + ','), 599, row + '],"status":"success"}');
+      } else if (data.statement === 'SELECT RAW "query-stream-late-error"') {
+        res.end('{"results":[1],"errors":[{"code":1080,"msg":"deadline"}],"status":"timeout"}');
+      } else if (data.statement === 'SELECT RAW "query-stream-malformed"') {
+        res.end('{"results":[1,tru]}');
+      } else if (data.statement === 'SELECT RAW "query-stream-truncated"') {
+        res.writeHead(200, {'content-length': 1000});
+        res.write('{"results":[1],"status":"success"}');
+        setTimeout(() => res.destroy(), 10);
+      } else if (data.statement?.includes('query-stream-')) {
+        const mode = data.statement;
+        res.write('{"results":[1,');
+        if (mode.includes('incremental')) {
+          const release = () => res.end('2],"status":"success"}');
+          queryGates.add(release);
+          res.once('close', () => queryGates.delete(release));
+        } else if (mode.includes('cancel')) {
+          // No further I/O can wake the producer: cancellation must abort a
+          // stalled read, rather than wait for the next row or the deadline.
+          res.once('close', () => requests.push({kind: 'query-stream-closed', mode}));
+        } else {
+          const timer = setInterval(() => res.write('0,'), 10);
+          res.once('close', () => {clearInterval(timer); requests.push({kind: 'query-stream-closed', mode});});
+        }
+      } else if (data.statement === 'SELECT RAW "query-context"') {
         res.writeHead(200, {'content-type': 'application/json'});
         res.end(JSON.stringify({results: [data.query_context], status: 'success'}));
       } else if (data.statement === 'SELECT RAW "query-oversized"') {
         res.writeHead(200, {'content-type': 'application/json'});
+        res.write('{"results":["');
         void writeChunks(res, Buffer.alloc(64 * 1024, 'x'), 33 * 16);
       } else if (['SELECT RAW "query-timeout"', 'SELECT RAW "query-timeout-http"'].includes(data.statement)) {
         res.writeHead(data.statement.includes('timeout-http') ? 500 : 200,

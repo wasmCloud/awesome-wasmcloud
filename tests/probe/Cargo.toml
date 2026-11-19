@@ -12,3 +12,6 @@ name = "component_fault_probe"
 wit-bindgen = { version = "0.63.0", features = ["async-spawn", "inter-task-wakeup"] }
 
 [workspace]
+
+[features]
+read-only = []

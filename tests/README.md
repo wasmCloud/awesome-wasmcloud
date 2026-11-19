@@ -51,7 +51,7 @@ The suite covers:
 | Frontend | POST-only dispatch, `Allow: POST`, invalid paths/configuration, incomplete incoming bodies never forwarded |
 | Deadlines | A peer trickling bytes cannot extend the whole-call deadline |
 | Stream bounds | Fixed-length and chunked uploads over 4 MiB return 413 before dispatch; stalled/trickling uploads return 408; oversized gRPC headers, frame floods and response bodies fail without poisoning the instance |
-| HTTP response bounds | Data API and SQL++ responses are read incrementally and refused above 32 MiB, including chunked bodies |
+| HTTP response bounds | Documents stop at 32 MiB; streamed SQL++ enforces per-row, metadata, response-byte and row-count budgets |
 | Egress and TLS | Denied host, untrusted CA and wrong certificate hostname fail before an RPC is dispatched |
 | Data API | Complete, truncated, stalled and trickling document bodies |
 | KV metadata | A concurrent replacement retries to a matching CAS; continuous changes time out; metadata denial and malformed metadata return errors; absent TTL remains absent |
@@ -113,5 +113,11 @@ message and reports the total in `grpc-frames`. Client and bidirectional streami
 are not implemented. TLS validates the certificate and hostname against the host's
 trust configuration. The frontend's deadline includes the incoming upload and body completion;
 only the remaining time is sent to the server through `grpc-timeout`.
-The Data API and SQL++ interfaces return complete values, so their stream readers
-retain at most 32 MiB of body bytes before decoding a result.
+Document replies retain at most 32 MiB of body bytes.
+SQL++ rows stream end to end, with 32 MiB per row, 64 KiB of metadata,
+256 MiB total response bytes and one million rows.
+The live suite verifies a 37.5 MiB result without buffering the array, a
+peer-controlled first-row gate, late errors, truncated transport, cancellation,
+backpressure deadlines and a caller importing only document-read.
+The real TLS harness also rejects a consumer that imports document-write
+without declaring that grant.
